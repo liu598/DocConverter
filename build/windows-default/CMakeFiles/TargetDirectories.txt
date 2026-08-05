@@ -1,0 +1,8 @@
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/DocConverter.dir
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/edit_cache.dir
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/rebuild_cache.dir
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/list_install_components.dir
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/install.dir
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/install/local.dir
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/DocConverter_autogen_timestamp_deps.dir
+D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/DocConverter_autogen.dir

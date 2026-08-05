@@ -1,0 +1,19 @@
+{
+	"BUILD_DIR" : "D:/Docconverter_1/DocConverter/build/windows-default/DocConverter_autogen",
+	"CMAKE_BINARY_DIR" : "D:/Docconverter_1/DocConverter/build/windows-default",
+	"CMAKE_CURRENT_BINARY_DIR" : "D:/Docconverter_1/DocConverter/build/windows-default",
+	"CMAKE_CURRENT_SOURCE_DIR" : "D:/Docconverter_1/DocConverter",
+	"CMAKE_SOURCE_DIR" : "D:/Docconverter_1/DocConverter",
+	"INCLUDE_DIR" : "D:/Docconverter_1/DocConverter/build/windows-default/DocConverter_autogen/include",
+	"INPUTS" : [ "D:/Docconverter_1/DocConverter/resources/app_icon.ico" ],
+	"LOCK_FILE" : "D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/DocConverter_autogen.dir/AutoRcc_icons_3YJK5W5UP7_Lock.lock",
+	"MULTI_CONFIG" : false,
+	"OPTIONS" : [ "-name", "icons" ],
+	"OUTPUT_CHECKSUM" : "3YJK5W5UP7",
+	"OUTPUT_NAME" : "qrc_icons.cpp",
+	"RCC_EXECUTABLE" : "D:/qt/6.11.1/msvc2022_64/bin/rcc.exe",
+	"RCC_LIST_OPTIONS" : [ "--list" ],
+	"SETTINGS_FILE" : "D:/Docconverter_1/DocConverter/build/windows-default/CMakeFiles/DocConverter_autogen.dir/AutoRcc_icons_3YJK5W5UP7_Used.txt",
+	"SOURCE" : "D:/Docconverter_1/DocConverter/resources/icons.qrc",
+	"VERBOSITY" : 0
+}

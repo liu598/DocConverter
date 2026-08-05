@@ -1,0 +1,15 @@
+# ninja log v5
+7	2487	8057987439882318	DocConverter_autogen/timestamp	a842ff611771b117
+7	2487	8057987439882318	DocConverter_autogen/mocs_compilation.cpp	a842ff611771b117
+7	2487	8057987439882318	D:/Docconverter_1/DocConverter/build/windows-default/DocConverter_autogen/timestamp	a842ff611771b117
+7	2487	8057987439882318	D:/Docconverter_1/DocConverter/build/windows-default/DocConverter_autogen/mocs_compilation.cpp	a842ff611771b117
+2491	2748	8057987450790066	DocConverter_autogen/3YJK5W5UP7/qrc_icons.cpp	321a5979a8e3f117
+2491	2748	8057987450790066	D:/Docconverter_1/DocConverter/build/windows-default/DocConverter_autogen/3YJK5W5UP7/qrc_icons.cpp	321a5979a8e3f117
+2788	3115	8057987454225601	CMakeFiles/DocConverter.dir/DocConverter_autogen/3YJK5W5UP7/qrc_icons.cpp.obj	8797dcf75f4c88e8
+2802	3231	8057987455458601	CMakeFiles/DocConverter.dir/resources/app.rc.res	1eecf732edf986b8
+2824	11548	8057987538697649	CMakeFiles/DocConverter.dir/src/installer.cpp.obj	e3a8c8f2eb61243c
+2749	14171	8057987564925313	CMakeFiles/DocConverter.dir/src/converter.cpp.obj	829eff5313124067
+2761	14695	8057987570201788	CMakeFiles/DocConverter.dir/src/main.cpp.obj	8893e2e6fb3cd955
+2839	14956	8057987572834814	CMakeFiles/DocConverter.dir/DocConverter_autogen/mocs_compilation.cpp.obj	7a8331f4885902d0
+2772	16091	8057987584182767	CMakeFiles/DocConverter.dir/src/mainwindow.cpp.obj	5ee50d26fcb9c7e2
+16093	17095	8057987592098204	DocConverter.exe	5697db96be04714c
