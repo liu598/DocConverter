@@ -12,8 +12,10 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QStringDecoder>
 #include <QTemporaryDir>
 #include <QUrl>
+#include <QVector>
 
 #ifdef Q_OS_WIN
 #  include <windows.h>
@@ -334,13 +336,56 @@ QString pandocWriterFor(const QString &target)
     return map.value(target);
 }
 
+// 源格式 -> Pandoc 的 reader 名。
+// 必须显式指定，不能靠后缀推断：.txt / .adoc / .asciidoc 这些后缀 Pandoc
+// 都不认识，会退回默认的 markdown 解析——纯文本里的 "- 第一项" 会莫名变成
+// 列表、"# 注释" 会变成标题，AsciiDoc 的 = 标题 / *粗体* 也完全对不上。
+QString pandocReaderFor(const QString &ext)
+{
+    static const QHash<QString, QString> map = {
+        {"md",    "markdown"},
+        // 纯文本按 markdown 读但不解析软换行：默认的软换行会在每个换行处
+        // 补一个空格，中文会被塞进多余空格；hard_line_breaks 保留原始断行。
+        {"txt",   "markdown+hard_line_breaks"},
+        {"html",  "html"},
+        {"rst",   "rst"},
+        {"org",   "org"},
+        {"adoc",  "asciidoc"},
+        {"tex",   "latex"},
+        {"docx",  "docx"},
+        {"odt",   "odt"},
+        {"rtf",   "rtf"},
+        {"epub",  "epub"},
+        {"pptx",  "pptx"}
+    };
+    return map.value(ext);
+}
+
 // 这些格式是「标记/纯文本」，直接交给 Pandoc 排版成 PDF 会依赖 LaTeX，
 // 因此统一先转 docx 再让 LibreOffice 出 PDF，成功率更高。
+// 注意 odt 不在此列：odt -> pdf 走 LibreOffice 直转是无损的，
+// 绕 Pandoc 转一道 docx 反而会丢掉页面样式、页眉页脚。
 bool isMarkupSource(const QString &ext)
 {
-    static const QStringList markup = {"md", "txt", "epub", "odt",
+    static const QStringList markup = {"md", "txt", "epub",
                                        "tex", "rst", "org", "adoc"};
     return markup.contains(ext);
+}
+
+// 可能是「本地编码」的纯文本源：需要先统一成 UTF-8 再交给 Pandoc
+bool isTextSource(const QString &ext)
+{
+    static const QStringList list = {"txt", "md", "html", "rst", "org",
+                                     "tex", "adoc"};
+    return list.contains(ext);
+}
+
+// 产物是纯文本/标记的格式：可以读出文字量做「有没有丢内容」的对比
+bool isTextTarget(const QString &target)
+{
+    static const QStringList list = {"txt", "md", "html", "rst", "org",
+                                     "tex", "adoc"};
+    return list.contains(target);
 }
 
 // Pandoc 读不了的源格式：老的二进制 .doc，以及只适合简单版面的 .pptx。
@@ -383,6 +428,182 @@ bool fileReady(const QString &path)
 {
     const QFileInfo fi(path);
     return fi.exists() && fi.isFile() && fi.size() > 0;
+}
+
+// ---------------------------------------------------------------------------
+// 文本编码归一化
+//
+// 中文用户的 .txt / .md 有相当比例是 GBK（或 GB18030）存的，甚至是从
+// Windows 记事本另存的 UTF-16。Pandoc 只按 UTF-8 解析，遇到这些编码会
+// 退化成 latin1，转出来的文档满篇乱码——这是「转换不准」最主要的来源之一。
+// 这里先识别编码、转成 UTF-8 副本，再把副本交给 Pandoc。
+// ---------------------------------------------------------------------------
+#ifdef Q_OS_WIN
+bool isValidUtf8(const QByteArray &data)
+{
+    if (data.isEmpty())
+        return true;
+    auto probe = [&data](int len) {
+        return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                   data.constData(), len, nullptr, 0) > 0;
+    };
+    if (probe(data.size()))
+        return true;
+    // 采样点可能正好截断在半个多字节字符上，去掉末尾 1~3 字节再试一次
+    for (int cut = 1; cut <= 3 && cut < data.size(); ++cut) {
+        if (probe(data.size() - cut))
+            return true;
+    }
+    return false;
+}
+
+QString decodeWithCodePage(const QByteArray &data, UINT cp)
+{
+    if (data.isEmpty())
+        return QString();
+    const int n = MultiByteToWideChar(cp, 0, data.constData(), data.size(), nullptr, 0);
+    if (n <= 0)
+        return QString();
+    QVector<wchar_t> buf(n);
+    MultiByteToWideChar(cp, 0, data.constData(), data.size(), buf.data(), n);
+    return QString::fromWCharArray(buf.constData(), n);
+}
+#endif
+
+// HTML 转成 UTF-8 之后，文件里若还写着 charset=gb2312，浏览器/阅读器
+// 会按旧编码再解一次，等于白转。把声明一起改掉。
+void fixHtmlCharset(QString &html)
+{
+    static const QRegularExpression metaCharset(
+        "(<meta[^>]*?charset\\s*=\\s*[\"']?)([A-Za-z0-9_.\\-]+)",
+        QRegularExpression::CaseInsensitiveOption);
+    if (html.contains(metaCharset))
+        html.replace(metaCharset, "\\1utf-8");
+}
+
+struct Utf8Prep
+{
+    QString path;        // 交给 Pandoc 的路径（可能是暂存目录里的 UTF-8 副本）
+    QString encoding;    // 识别出的原始编码，用于日志
+    bool converted = false;
+};
+
+Utf8Prep prepareUtf8Input(const QString &inputPath, const QString &stagingDir,
+                          const QString &ext)
+{
+    Utf8Prep prep;
+    prep.path = inputPath;
+
+    if (!isTextSource(ext))
+        return prep;
+
+    const QFileInfo fi(inputPath);
+    // 超大文件不做内存里全量转码，避免把一个 500MB 的日志顶进内存
+    if (!fi.isFile() || fi.size() <= 0 || fi.size() > 64LL * 1024 * 1024)
+        return prep;
+
+    QFile in(inputPath);
+    if (!in.open(QIODevice::ReadOnly))
+        return prep;
+    const QByteArray raw = in.readAll();
+    in.close();
+
+    // 含 NUL 字节的多半不是纯文本，别猜编码了
+    if (raw.contains('\0') && !raw.startsWith("\xFF\xFE") && !raw.startsWith("\xFE\xFF"))
+        return prep;
+
+    QString text;
+    if (raw.startsWith("\xEF\xBB\xBF")) {
+        text = QString::fromUtf8(raw.mid(3));
+        prep.encoding = "UTF-8(BOM)";
+    } else if (raw.startsWith("\xFF\xFE") || raw.startsWith("\xFE\xFF")) {
+        // 这种文件里每个 ASCII 字符后面都跟着一个 0x00，必须按 UTF-16 读
+        const bool little = raw.startsWith("\xFF\xFE");
+        QStringDecoder dec(little ? "UTF-16LE" : "UTF-16BE");
+        text = dec(raw.mid(2));
+        prep.encoding = little ? "UTF-16LE" : "UTF-16BE";
+    } else {
+#ifdef Q_OS_WIN
+        if (isValidUtf8(raw))
+            return prep;                 // 本来就是 UTF-8，原文件直接用
+        const UINT acp = GetACP();
+        text = decodeWithCodePage(raw, acp);
+        prep.encoding = (acp == 936) ? QString("GBK/GB18030")
+                                     : QString("本地编码 CP%1").arg(acp);
+#else
+        return prep;
+#endif
+    }
+
+    if (text.isEmpty())
+        return prep;
+
+    if (ext == "html")
+        fixHtmlCharset(text);
+
+    QDir().mkpath(stagingDir);
+    const QString outPath = QDir(stagingDir).filePath("_dc_utf8_" + fi.fileName());
+    QFile out(outPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return prep;
+    out.write(text.toUtf8());
+    out.close();
+
+    prep.path = outPath;
+    prep.converted = true;
+    return prep;
+}
+
+// LibreOffice 的 txt 导出固定带 UTF-8 BOM，记事本以外的编辑器会显示成一个方块
+void stripUtf8Bom(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return;
+    const QByteArray head = f.read(3);
+    if (head != QByteArray("\xEF\xBB\xBF")) {
+        f.close();
+        return;
+    }
+    const QByteArray rest = f.readAll();
+    f.close();
+
+    QFile w(path);
+    if (!w.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    w.write(rest);
+}
+
+// 统计文本类文件里「有效字符」的数量（去掉标签和空白），
+// 用来判断转换前后文字量是否对得上。
+int textVolume(const QString &path, const QString &ext)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return -1;
+    QByteArray raw = f.read(16 * 1024 * 1024);
+    f.close();
+    if (raw.startsWith("\xEF\xBB\xBF"))
+        raw = raw.mid(3);
+
+    QString s = QString::fromUtf8(raw);
+    if (ext == "html" || ext == "htm") {
+        static const QRegularExpression script(
+            "<script[^>]*>.*?</script>",
+            QRegularExpression::CaseInsensitiveOption
+                | QRegularExpression::DotMatchesEverythingOption);
+        static const QRegularExpression style(
+            "<style[^>]*>.*?</style>",
+            QRegularExpression::CaseInsensitiveOption
+                | QRegularExpression::DotMatchesEverythingOption);
+        static const QRegularExpression tags("<[^>]*>");
+        s.remove(script);
+        s.remove(style);
+        s.remove(tags);
+    }
+    static const QRegularExpression spaces("\\s");
+    s.remove(spaces);
+    return s.size();
 }
 
 int timeoutFor(const QFileInfo &fi, const QString &target, const QString &ext)
@@ -618,6 +839,9 @@ Converter::Result Converter::convertFile(const QString &inputPath,
         result.message = "源文件不存在：" + inputPath;
         return result;
     }
+    // 后面所有引擎调用都会把工作目录切到暂存目录（为了 --extract-media 的相对
+    // 路径），相对路径的输入到那里就找不到了，统一先转成绝对路径。
+    const QString srcPath = fi.absoluteFilePath();
 
     const QString ext = normalizeExt(fi.suffix().toLower());
     const QString target = normalizeExt(targetFormat.toLower());
@@ -670,6 +894,13 @@ Converter::Result Converter::convertFile(const QString &inputPath,
     QStringList notes;      // 降级 / 重试之类的补充说明
     QString produced;       // 暂存目录中最终产物的路径
 
+    // 非 UTF-8 的文本源先转成 UTF-8 副本：GBK 的 txt 直接喂给 Pandoc
+    // 会退化成 latin1，输出整篇乱码。LibreOffice 自己认编码，不必转换。
+    const Utf8Prep prep = prepareUtf8Input(srcPath, staging.path(), ext);
+    if (prep.converted)
+        notes << QString("源文件编码为 %1，已转成 UTF-8 后处理").arg(prep.encoding);
+    const QString inputForPandoc = prep.path;
+
     // --- 用 LibreOffice 转换 ---
     auto sofficeConvert = [&](const QString &input, const QString &fmt,
                               const QString &destDir, const QString &infilter) -> Result {
@@ -687,7 +918,13 @@ Converter::Result Converter::convertFile(const QString &inputPath,
             args << ("-env:UserInstallation=" + QUrl::fromLocalFile(profile.path()).toString());
         if (!infilter.isEmpty())
             args << ("--infilter=" + infilter);
-        args << "--convert-to" << fmt << "--outdir" << destDir << input;
+
+        // LibreOffice 默认的 txt 导出用系统本地编码（中文系统就是 GBK），
+        // 输出文件在 UTF-8 编辑器里打开是乱码，扫描件检测也会跟着误判。
+        // 显式指定 UTF-8 的导出过滤器，让 txt 产物和 Pandoc 产出的编码一致。
+        const QString formatSpec = (fmt == "txt") ? QString("txt:Text (encoded):UTF8")
+                                                  : fmt;
+        args << "--convert-to" << formatSpec << "--outdir" << destDir << input;
         return runProcess(soffice, args, timeoutMs, token);
     };
 
@@ -699,7 +936,12 @@ Converter::Result Converter::convertFile(const QString &inputPath,
             r.message = "未检测到 Pandoc，无法完成该转换";
             return r;
         }
-        QStringList args = {input, "-o", output};
+        QStringList args;
+        // 显式指定 reader：不让 Pandoc 猜后缀，txt/adoc 猜错就会解析成别的东西
+        const QString reader = pandocReaderFor(ext);
+        if (!reader.isEmpty())
+            args << "-f" << reader;
+        args << input << "-o" << output;
         if (!writer.isEmpty())
             args << "-t" << writer;
 
@@ -719,6 +961,21 @@ Converter::Result Converter::convertFile(const QString &inputPath,
             // 这里必须用相对路径（配合下面的工作目录），否则 pandoc 会把链接写成
             // 临时目录的绝对路径，文件搬到输出目录后链接就全断了。
             args << ("--extract-media=" + mediaDirName);
+            // 默认按 72 列硬折行：中文段落会被从句子中间切开，看起来像断句错误
+            args << "--wrap=none";
+        } else if (writer == "plain") {
+            // 同上，否则导出的 txt 每 72 列断一次行
+            args << "--wrap=none";
+        } else if (writer == "epub") {
+            // 没有目录的 epub 在阅读器里基本没法用；顺便补上元数据标题，
+            // 否则书名栏显示的是 Untitled
+            args << "--toc" << "--toc-depth=2"
+                 << "--metadata" << ("title=" + finalBase);
+        } else if (writer == "docx" || writer == "rtf") {
+            // 只写进文件属性（文档信息里的标题），不会往正文插标题页。
+            // odt 不在此列：ODT 写出器会把 title 渲染成正文第一段的标题，
+            // 而这里的 title 只是文件名，插进正文纯属噪音。
+            args << "--metadata" << ("title=" + finalBase);
         }
         // 工作目录设成暂存目录：-o 仍然用绝对路径，
         // 但 --extract-media 的相对路径会落在暂存目录里
@@ -733,7 +990,7 @@ Converter::Result Converter::convertFile(const QString &inputPath,
         // 成功率不稳定；先用 Pandoc 转成 docx，再交给 LibreOffice 排版成 PDF。
         if (isMarkupSource(ext)) {
             const QString mid = staging.filePath("_dc_stage.docx");
-            Result r1 = pandocConvert(inputPath, mid, "docx");
+            Result r1 = pandocConvert(inputForPandoc, mid, "docx");
             if (r1.canceled)
                 return r1;
             if (!r1.success) {
@@ -755,7 +1012,7 @@ Converter::Result Converter::convertFile(const QString &inputPath,
         // 其余格式（docx/doc/rtf/html/pdf），以及上面 Pandoc 路线失败的情况，
         // 都再交给 LibreOffice 直转一次
         if (produced.isEmpty()) {
-            Result r = sofficeConvert(inputPath, "pdf", staging.path(), QString());
+            Result r = sofficeConvert(srcPath, "pdf", staging.path(), QString());
             if (r.canceled)
                 return r;
             if (r.success) {
@@ -790,7 +1047,7 @@ Converter::Result Converter::convertFile(const QString &inputPath,
                 if (!python.isEmpty() && QFileInfo(script).isFile()) {
                     // -X utf8 让 python 的 stdout/stderr 也用 UTF-8，
                     // 否则 Windows 下默认 GBK，我们按 UTF-8 解码就会乱码
-                    const QStringList args = {"-X", "utf8", "-u", script, inputPath, dest};
+                    const QStringList args = {"-X", "utf8", "-u", script, srcPath, dest};
                     // pdf2docx 比命令行工具慢得多，超时给两倍
                     Result r = runProcess(python, args, timeoutMs * 2, token);
                     if (r.canceled) {
@@ -799,9 +1056,28 @@ Converter::Result Converter::convertFile(const QString &inputPath,
                     }
                     if (r.success && fileReady(dest)) {
                         ok.success = true;
-                        // 脚本在结果几乎没文字时会打 SCANNED_PDF 标记
-                        if (r.output.contains("SCANNED_PDF"))
+                        // 脚本转换完会在输出末尾打两类标记：
+                        //   PDF_PAGES: total=12 empty=10   有多少页没有文字层
+                        //   SCANNED_PDF                   整份几乎没文字
+                        static const QRegularExpression pagesRe(
+                            "PDF_PAGES:\\s*total=(\\d+)\\s+empty=(\\d+)");
+                        const QRegularExpressionMatch m = pagesRe.match(r.output);
+                        const int total = m.hasMatch() ? m.captured(1).toInt() : 0;
+                        const int empty = m.hasMatch() ? m.captured(2).toInt() : 0;
+
+                        if (empty > 0 && total > 0) {
+                            if (empty == total)
+                                notes << QString("该 PDF 共 %1 页，全部没有文字层"
+                                                 "（纯图片扫描件），转换结果不会有正文")
+                                             .arg(total);
+                            else
+                                notes << QString("该 PDF 共 %1 页，其中 %2 页没有文字层"
+                                                 "（可能是扫描页），这部分内容会缺失，"
+                                                 "需要先用 OCR 才能完整转换")
+                                             .arg(total).arg(empty);
+                        } else if (r.output.contains("SCANNED_PDF")) {
                             notes << "该 PDF 可能是扫描件（图片型），结果几乎不含文字，需要先 OCR";
+                        }
                         return ok;
                     }
                     // 不再静默降级：把失败原因带出去，日志里能看到实际用了哪个引擎
@@ -811,7 +1087,7 @@ Converter::Result Converter::convertFile(const QString &inputPath,
                 }
             }
 
-            Result r = sofficeConvert(inputPath, "docx", staging.path(), infilter);
+            Result r = sofficeConvert(srcPath, "docx", staging.path(), infilter);
             if (r.canceled) {
                 ok.canceled = true;
                 return ok;
@@ -871,7 +1147,7 @@ Converter::Result Converter::convertFile(const QString &inputPath,
 
         // 2.3 其余目标格式交给 LibreOffice
         if (produced.isEmpty()) {
-            Result r = sofficeConvert(inputPath, target, staging.path(), infilter);
+            Result r = sofficeConvert(srcPath, target, staging.path(), infilter);
             if (r.canceled)
                 return r;
             if (!r.success) {
@@ -886,11 +1162,32 @@ Converter::Result Converter::convertFile(const QString &inputPath,
     // -----------------------------------------------------------------
     else {
         const QString writer = pandocWriterFor(target);
+        const bool textTarget = isTextTarget(target) || target == "epub";
 
-        // pptx：Impress 只能导出演示格式 / PDF / 图片，写不出 docx 这类文档格式
-        // （直接转会报 "no export filter"）。先落成 PDF，再复用整条「PDF → 目标」的链路。
+        // pptx：Pandoc 本身就能读（按幻灯片结构取出标题和正文），
+        // 比「先拍平成 PDF 再提取」保真得多——后者拿到的是版面文字流，
+        // 段落结构、标题层级全丢。所以文本类目标优先让 Pandoc 直读；
+        // 目标是 docx/odt/rtf 这类要保版面的文档时，仍走 PDF 路径。
         if (ext == "pptx") {
-            Result r = sofficeConvert(inputPath, "pdf", staging.path(), QString());
+            if (textTarget && !writer.isEmpty()) {
+                Result r = pandocConvert(inputForPandoc, stagedOut, writer);
+                if (r.canceled)
+                    return r;
+                if (r.success && fileReady(stagedOut)) {
+                    produced = stagedOut;
+                    notes << "PPTX 已按幻灯片结构抽取为文本（版式与主题不会保留）";
+                } else {
+                    if (!r.success)
+                        notes << ("Pandoc 读取 PPTX 失败：" + r.message);
+                    QFile::remove(stagedOut);
+                }
+            }
+        }
+
+        // Impress 只能导出演示格式 / PDF / 图片，写不出 docx 这类文档格式
+        // （直接转会报 "no export filter"）。先落成 PDF，再复用整条「PDF → 目标」的链路。
+        if (ext == "pptx" && produced.isEmpty()) {
+            Result r = sofficeConvert(srcPath, "pdf", staging.path(), QString());
             if (r.canceled)
                 return r;
             if (!r.success) {
@@ -920,7 +1217,7 @@ Converter::Result Converter::convertFile(const QString &inputPath,
         // writer 为空说明 Pandoc 写不出这个格式（目前只有 doc），
         // 那就别白试一次，直接交给 LibreOffice。
         if (produced.isEmpty() && !writer.isEmpty() && pandocCanRead(ext)) {
-            Result r = pandocConvert(inputPath, stagedOut, writer);
+            Result r = pandocConvert(inputForPandoc, stagedOut, writer);
             if (r.canceled)
                 return r;
             if (r.success && fileReady(stagedOut)) {
@@ -935,7 +1232,7 @@ Converter::Result Converter::convertFile(const QString &inputPath,
         }
 
         if (produced.isEmpty()) {
-            Result r2 = sofficeConvert(inputPath, target, staging.path(), QString());
+            Result r2 = sofficeConvert(srcPath, target, staging.path(), QString());
             if (r2.canceled)
                 return r2;
             if (!r2.success) {
@@ -959,6 +1256,34 @@ Converter::Result Converter::convertFile(const QString &inputPath,
         return result;
     }
 
+    // ---- 产物自检：光有文件不算完成，还得看起来是那个东西 ----
+    if (target == "txt")
+        stripUtf8Bom(produced);
+
+    if (target == "pdf") {
+        QFile f(produced);
+        const bool looksLikePdf = f.open(QIODevice::ReadOnly)
+                                  && f.read(5).startsWith("%PDF")
+                                  && QFileInfo(produced).size() > 800;
+        if (!looksLikePdf) {
+            result.message = "生成的 PDF 无效（引擎可能未正确排版）";
+            if (!notes.isEmpty())
+                result.message += "：" + notes.join("；");
+            return result;
+        }
+    }
+
+    // 文本类互转时对比「有效字符数」：排版类转换正常情况下文字量只会多不会少，
+    // 掉得过多基本就是解析出错或中途截断，宁可给个提示也别让用户以为换完了。
+    if (isTextSource(ext) && ext != "tex" && isTextTarget(target)) {
+        const int srcVol = textVolume(prep.path, ext);
+        const int outVol = textVolume(produced, target);
+        if (srcVol >= 200 && outVol >= 0 && outVol * 10 < srcVol * 6) {
+            notes << QString("输出文字量明显少于源文件（%1 字 → %2 字），"
+                             "建议打开检查是否有内容丢失").arg(srcVol).arg(outVol);
+        }
+    }
+
     if (!moveFile(produced, finalPath)) {
         result.message = "无法写入输出目录：" + finalPath +
                          "（可能没有写入权限，或文件正被其他程序占用）";
@@ -976,20 +1301,11 @@ Converter::Result Converter::convertFile(const QString &inputPath,
 
     // 扫描件（图片型）PDF 转文字几乎必然是空的。
     // 与其让用户以为「转换坏了」，不如直接告诉他原因和出路。
-    if (sourceIsPdf && fi.size() > 100 * 1024
-        && (target == "txt" || target == "md" || target == "html")) {
-        QFile f(finalPath);
-        if (f.open(QIODevice::ReadOnly)) {
-            QString text = QString::fromUtf8(f.readAll());
-            f.close();
-            static const QRegularExpression tags("<[^>]*>");
-            static const QRegularExpression spaces("\\s");
-            text.remove(tags);
-            text.remove(spaces);
-            if (text.size() < 40) {
-                notes << "输出几乎不含文字：该 PDF 可能是扫描件（图片型），"
-                         "本工具不含 OCR，需要先用 OCR 软件识别";
-            }
+    if (sourceIsPdf && fi.size() > 100 * 1024 && isTextTarget(target)) {
+        const int vol = textVolume(finalPath, target);
+        if (vol >= 0 && vol < 40) {
+            notes << "输出几乎不含文字：该 PDF 可能是扫描件（图片型），"
+                     "本工具不含 OCR，需要先用 OCR 软件识别";
         }
     }
 

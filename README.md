@@ -23,26 +23,55 @@
 
 | 源 → 目标 | 走的路径 |
 |---|---|
-| 任意文档 → PDF | LibreOffice 直接转；md / txt / epub / odt / tex / rst / org / adoc 先由 Pandoc 转 docx 再排版成 PDF（避开 LaTeX 依赖） |
+| 任意文档 → PDF | LibreOffice 直接转；md / txt / epub / tex / rst / org / adoc 先由 Pandoc 转 docx 再排版成 PDF（避开 LaTeX 依赖）。**odt → PDF 走 LibreOffice 直转**，绕 Pandoc 反而会丢页面样式 |
 | 任意文档 → pptx | Pandoc：按标题层级自动分页 |
 | 任意文档 → tex / rst / org / adoc | Pandoc 对应 writer，输出带 `-s` 的完整文档（LaTeX 有 `\documentclass`，rst/org/adoc 有标题） |
 | PDF → docx | 优先 pdf2docx（正文还原成真段落），没装则退回 LibreOffice |
 | PDF → md / html / txt / epub / tex / rst / org / adoc | PDF → docx（pdf2docx 优先）→ 目标格式（Pandoc） |
 | PDF → odt / rtf / doc | LibreOffice + `writer_pdf_import` 过滤器 |
-| PPTX → 其他格式 | 先由 LibreOffice 按页转成 PDF，再走上面的 PDF 链路 |
-| 其余文档互转 | 优先 Pandoc（快、保真），失败回退 LibreOffice；`.doc` 与 `.pptx` 直接交给 LibreOffice |
+| PPTX → md / txt / html / epub / tex / rst / org / adoc | Pandoc 直接读 pptx，按幻灯片结构抽取标题与正文 |
+| PPTX → docx / odt / rtf | 先由 LibreOffice 按页转成 PDF，再走 PDF 链路（要保版面） |
+| 其余文档互转 | 优先 Pandoc（快、保真），失败回退 LibreOffice；`.doc` 直接交给 LibreOffice |
+
+## 保真处理
+
+转换的「准不准」主要卡在编码、解析方式、换行这几处，都已经在引擎层处理：
+
+- **源文件编码自动识别**：`txt / md / html / rst / org / tex / adoc` 会先判断是
+  UTF-8（含 BOM）、UTF-16LE/BE 还是系统本地编码（中文系统即 GBK/GB18030），
+  非 UTF-8 的统一转成 UTF-8 副本再交给 Pandoc。
+  Pandoc 只认 UTF-8，遇到 GBK 会退化成 latin1，转出来就是 `ÖÐÎÄ` 这种乱码。
+  HTML 转码后还会把 `<meta charset=...>` 一起改掉，否则阅读器会按旧编码再解一次。
+- **显式指定 Pandoc reader**：不让它按后缀猜。`.txt` / `.adoc` 这类后缀 Pandoc 不认识，
+  猜错就会把纯文本里的 `- 项目` 当列表、`# 注释` 当标题。
+- **纯文本保换行**：`.txt` 按 `markdown+hard_line_breaks` 读，保留原始断行；
+  默认的软换行会在每个换行处补一个空格，中文会被塞进多余空格。
+- **输出不按列宽折行**：Pandoc 的 markdown / plain 写出器默认 72 列折行，
+  中文长段落会被从句子中间硬切开。导出的 md / txt 现在一律 `--wrap=none`。
+- **txt 统一 UTF-8**：LibreOffice 默认用系统本地编码导出 txt（中文系统就是 GBK），
+  现在显式用 `txt:Text (encoded):UTF8` 过滤器，并去掉 BOM，和 Pandoc 的产物编码一致。
+- **产物自检**：PDF 目标会校验 `%PDF` 文件头与体积；文本类互转会对比前后
+  「有效字符数」，文字量掉超过 40% 就提示可能丢内容，而不是默默算成功。
+- **PDF 逐页诊断**：pdf2docx 会统计有多少页没有文字层，直接告诉你
+  「共 12 页，其中 3 页没有文字层（可能是扫描页）」；单页解析失败也只跳过该页，
+  不会整份放弃。
+- **元数据不污染正文**：标题只写进 docx / rtf 的文档属性；ODT 会把它渲染成
+  正文第一段，所以 ODT 不写。
 
 几个容易踩的坑已经处理掉了：
 
 - PDF 必须显式指定 `writer_pdf_import`，否则 LibreOffice 用 Draw 打开，报 `no export filter`
 - **LibreOffice 的 PDF 导入会把正文塞进文本框**，Pandoc 读 docx 时完全看不到（只剩标题）。
   所以 PDF 转文本格式必须先过 pdf2docx，没有它就只能退回 LibreOffice、正文可能丢失
-- .doc 与 .pptx 是 Pandoc 读不了的（老二进制格式 / 只认简单版面），别再白跑一次
+- .doc 是 Pandoc 读不了的（老二进制格式），别再白跑一次
 - HTML 输出加了 `--standalone --embed-resources`，得到带样式的完整页面并把图片内嵌进去（原来是缺 `<head>` 的裸片段）
 - 转 Markdown 时用 `--extract-media` 把图片抽到 `文件名_media/` 目录，且**用相对路径写入链接**，
   文件搬到输出目录后链接依然有效
+- epub 输出带 `--toc` 目录与元数据标题，否则阅读器里书名是 Untitled、也没法跳转
 - LibreOffice 每次调用都给独立的 `-env:UserInstallation` 配置目录，**你开着 LibreOffice 也不影响转换**
 - 转换结果先落临时目录，**校验文件确实存在且非空**才搬进输出目录（LibreOffice 有时退出码 0 但什么都没生成）
+- 输入路径统一转成绝对路径再交给引擎：转 Markdown 时会把工作目录切到暂存目录，
+  相对路径到那里就找不到了
 
 ## 依赖的引擎
 
@@ -132,9 +161,11 @@ D:\Qt\Tools\QtInstallerFramework\4.11\bin\binarycreator.exe ^
 
 ## 已知限制
 
-- **扫描件 PDF（图片型）** 没有 OCR，转出来基本是空的——日志会提示需要先做 OCR，但工具本身不提供识别能力。
+- **扫描件 PDF（图片型）** 没有 OCR，转出来基本是空的——日志会逐页告诉你哪几页没有文字层，
+  但工具本身不提供识别能力。
 - **PDF → 文本类格式依赖 pdf2docx**：没装时退回 LibreOffice，正文可能只剩标题（它的 PDF 导入把内容放进了文本框）。
-- **PPTX → 文档格式是「按页拍平」的**：先转 PDF 再转文档，不是可编辑的幻灯片大纲。
+- **PPTX → docx/odt/rtf 是「按页拍平」的**：先转 PDF 再转文档，保版面但不是可编辑的幻灯片大纲；
+  转文本类格式（md/txt/html/…）则走 Pandoc 的结构化抽取，标题层级和正文顺序都在，但会丢版式。
 - **.tex 输出依赖 xelatex 才能出中文 PDF**：转成 .tex 没问题，但拿它自己去编译需要装 TeX 发行版。
 - Markdown → PDF 的样式比较朴素（Pandoc 生成 docx 的默认样式）。
 - 批量转换是**串行**的：LibreOffice 本身不适合并发起多个实例，串行反而更快更稳。
@@ -168,6 +199,24 @@ DocConverter/
 ```
 
 ## 变更记录
+
+### 1.3.0
+主打「转得准」：修掉几处会损坏内容或静默出错的链路。
+
+- **源编码自动识别**：GBK / GB18030 / UTF-16 的 txt、md、html 等先转成 UTF-8 副本再交给 Pandoc，
+  不再出现 `ÖÐÎÄ` 式乱码；HTML 的 `<meta charset>` 同步改写
+- **显式指定 Pandoc reader**：`.txt` / `.adoc` 不再被当成 markdown 误解析
+- **纯文本按 `hard_line_breaks` 读**：保留原始断行，不再在每个换行处插入空格
+- **输出 `--wrap=none`**：md / txt 不再按 72 列折断中文段落
+- **txt 统一 UTF-8**：LibreOffice 的 txt 导出改用 `Text (encoded):UTF8` 过滤器并去掉 BOM
+- **odt → PDF 改为 LibreOffice 直转**：绕 Pandoc 转 docx 会丢页面样式、页眉页脚
+- **pptx → 文本类格式改走 Pandoc 读取器**：按幻灯片结构抽取标题与正文，不再先拍平成 PDF
+- **PDF 逐页文字层诊断**：能报出「共 N 页，其中 M 页没有文字层」，单页解析失败只跳过该页
+- **产物自检**：PDF 校验文件头与体积；文本互转对比有效字符数，掉超过 40% 会提示可能丢内容
+- **修复相对路径输入失败**：工作目录切到暂存目录后，相对路径的源文件会找不到
+- **ODT 不再被插入文件名标题**：title 元数据只写 docx / rtf 的文档属性
+- epub 输出加 `--toc` 目录与元数据标题
+- 测试新增：GBK / UTF-16 识别、长段落不折行、pptx 结构化抽取、ODT 无注入标题
 
 ### 1.2.0
 - 新增 6 种目标格式：**doc**（Word 97-2003）、**pptx**（幻灯片）、**tex**（LaTeX）、

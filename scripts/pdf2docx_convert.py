@@ -1,4 +1,4 @@
-"""pdf2docx 的薄封装：把 PDF 转成 docx，并检测「转出来是空的」这种扫描件情况。
+"""pdf2docx 的薄封装：把 PDF 转成 docx，并报告文字层覆盖情况。
 
 用法: python -X utf8 -u pdf2docx_convert.py <输入.pdf> <输出.docx>
 
@@ -7,9 +7,14 @@
     2  参数错误
     其它  由 pdf2docx 抛出的异常决定
 
-扫描件（图片型 PDF）转出来几乎没有文字，用户看到空文档会以为工具坏了。
-这里检测到就在 stderr 打一个 ASCII 标记 SCANNED_PDF，由 C++ 侧转成中文提示——
-脚本本身不输出中文，避免 Windows 控制台编码问题。
+两个作用：
+1. 单页失败不会毁掉整份文档（ignore_page_error），坏页跳过、其余照常输出。
+2. 统计有多少页根本没有文字层，把结果打成 ASCII 标记交给 C++ 侧转成中文提示。
+   扫描件 PDF 转出来几乎是空的，用户看到空文档只会以为工具坏了。
+
+标记格式（都在 stderr，脚本本身不输出中文，避免 Windows 控制台编码问题）:
+    PDF_PAGES: total=12 empty=10
+    SCANNED_PDF: converted docx contains almost no text
 """
 
 import re
@@ -18,21 +23,43 @@ import zipfile
 
 from pdf2docx import Converter
 
-# 结果里有效文字少于此值，就认为是扫描件
+# 结果里有效文字少于此值，就认为整份是扫描件
 MIN_TEXT_CHARS = 20
+# 单页文字少于此值，认为该页没有文字层
+MIN_PAGE_CHARS = 10
 
 
-def looks_scanned(docx_path):
+def page_text_stats(pdf_path):
+    """返回 (总页数, 无文字层页数)，失败时返回 (0, 0)。"""
+    try:
+        import fitz  # pdf2docx 依赖 PyMuPDF，一定在
+    except Exception:
+        return 0, 0
+
+    total = empty = 0
+    try:
+        doc = fitz.open(pdf_path)
+        total = doc.page_count
+        for page in doc:
+            if len(page.get_text("text").strip()) < MIN_PAGE_CHARS:
+                empty += 1
+        doc.close()
+    except Exception:
+        return 0, 0
+    return total, empty
+
+
+def docx_text_chars(docx_path):
     """读 docx（本质是 zip）里的 document.xml，统计有效文字量。"""
     try:
         with zipfile.ZipFile(docx_path) as z:
             xml = z.read("word/document.xml").decode("utf-8", "ignore")
     except Exception:
-        return False
+        return -1
 
     text = re.sub(r"<[^>]+>", "", xml)
     text = re.sub(r"\s+", "", text)
-    return len(text) < MIN_TEXT_CHARS
+    return len(text)
 
 
 def main():
@@ -44,11 +71,24 @@ def main():
 
     cv = Converter(input_path)
     try:
-        cv.convert(output_path)
+        # 单页解析失败时跳过该页而不是整份放弃——复杂版面里个别页
+        # 遇到不支持的图形对象很常见，没必要因此前功尽弃。
+        try:
+            cv.convert(output_path, ignore_page_error=True)
+        except TypeError:
+            # 老版本 pdf2docx 没有这个参数
+            cv.convert(output_path)
     finally:
         cv.close()
 
-    if looks_scanned(output_path):
+    # 统计放在转换之后打印：C++ 侧只保留输出的尾部若干 KB，
+    # 提前打印会被 pdf2docx 的逐页进度刷掉。
+    total, empty = page_text_stats(input_path)
+    if total:
+        print(f"PDF_PAGES: total={total} empty={empty}", file=sys.stderr)
+
+    chars = docx_text_chars(output_path)
+    if 0 <= chars < MIN_TEXT_CHARS:
         print("SCANNED_PDF: converted docx contains almost no text", file=sys.stderr)
 
 

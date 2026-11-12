@@ -20,7 +20,9 @@
 //     LibreOffice 时 --convert-to 被转发给已有实例而静默失败；
 //  4. 子进程输出边跑边排空，避免大量日志把管道/内存顶爆；
 //  5. 支持取消令牌，超时按文件大小动态计算；
-//  6. 错误信息按 UTF-8 解码（pandoc / python 的输出都是 UTF-8）。
+//  6. 错误信息按 UTF-8 解码（pandoc / python 的输出都是 UTF-8）；
+//  7. 保真相关：源文件编码自动识别（GBK/UTF-16 → UTF-8）、Pandoc reader
+//     显式指定、输出不按列宽折行、产物自检（PDF 头 / 文字量对比）。
 class Converter
 {
 public:

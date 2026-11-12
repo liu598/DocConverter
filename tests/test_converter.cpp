@@ -35,6 +35,11 @@ private slots:
     void testMdToPptx();
     void testDocxToDoc();
     void testPdfToMarkdown();
+    void testGbkTxtToMd();
+    void testUtf16TxtToMd();
+    void testLongParagraphNotWrapped();
+    void testPptxStructureToMd();
+    void testOdtHasNoInjectedTitle();
 
 private:
     void requireEngines();
@@ -45,6 +50,7 @@ private:
     QString m_mdPath;
     QString m_docxPath;     // testMdToDocx 生成，后续用例复用
     QString m_pdfPath;      // testMdToPdf 生成
+    QString m_pptxPath;     // testMdToPptx 生成
 };
 
 void TestConverter::initTestCase()
@@ -297,6 +303,7 @@ void TestConverter::testMdToPptx()
     QFile f(r.outputPath);
     QVERIFY(f.open(QIODevice::ReadOnly));
     QCOMPARE(f.read(2), QByteArray("PK"));
+    m_pptxPath = r.outputPath;
 }
 
 void TestConverter::testDocxToDoc()
@@ -335,6 +342,139 @@ void TestConverter::testPdfToMarkdown()
     // 图片链接必须是相对路径，否则文件搬走后全断
     QVERIFY2(!md.contains(":/") || !md.contains("_media/"),
              qPrintable("markdown 里的图片链接是绝对路径：" + md));
+}
+
+// GBK 编码的 txt 是最容易出乱码的场景：Pandoc 只认 UTF-8，会退化成 latin1，
+// 转出来就是「ÖÐÎÄ」这种。转换前必须先识别编码并转成 UTF-8。
+void TestConverter::testGbkTxtToMd()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    // “中文标题\n\n这是中文正文。\n” 的 GBK 字节
+    const QByteArray gbk = QByteArray::fromHex(
+        "d6d0cec4b1eacce20a0ad5e2cac7d6d0cec4d5fdcec4a1a30a");
+    const QString txtPath = writeSample("enc/gbk.txt", gbk);
+    QVERIFY(!txtPath.isEmpty());
+
+    const Converter::Result r = Converter::convertFile(txtPath, "md", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString md = QString::fromUtf8(f.readAll());
+
+    QVERIFY2(md.contains("中文标题"), qPrintable("GBK 没被正确识别：" + md));
+    QVERIFY2(md.contains("这是中文正文"), qPrintable("GBK 正文丢失：" + md));
+    QVERIFY2(!md.contains(QChar(0xFFFD)), qPrintable("输出里出现替换字符：" + md));
+    // 应当提示编码被转换过，用户才知道为什么文件被「动过」
+    QVERIFY2(r.message.contains("编码"), qPrintable("没有报告编码转换：" + r.message));
+}
+
+// 记事本另存为「Unicode」得到的 UTF-16LE 文件：每个 ASCII 后面跟一个 0x00，
+// 不按 UTF-16 读的话整篇都是乱码和空字符
+void TestConverter::testUtf16TxtToMd()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    const QString text = QStringLiteral("UTF16 编码的中文正文。\n");
+    QByteArray raw;
+    raw.append("\xFF\xFE", 2);
+    for (const QChar ch : text) {
+        const ushort u = ch.unicode();
+        raw.append(char(u & 0xFF));
+        raw.append(char((u >> 8) & 0xFF));
+    }
+    const QString txtPath = writeSample("enc/u16.txt", raw);
+    QVERIFY(!txtPath.isEmpty());
+
+    const Converter::Result r = Converter::convertFile(txtPath, "md", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString md = QString::fromUtf8(f.readAll());
+    QVERIFY2(md.contains("UTF16 编码的中文正文"), qPrintable("UTF-16 没被正确识别：" + md));
+}
+
+// Pandoc 的 markdown / plain 写出器默认按 72 列折行，中文段落会被从句子
+// 中间硬切开；导出的 txt/md 看起来像断句错了，实际是排版副作用。
+void TestConverter::testLongParagraphNotWrapped()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    const QString sentence =
+        QStringLiteral("这是一个刻意写得很长的中文段落用来验证导出的文本不会被按列宽"
+                       "硬折断因为一旦折断读者会以为句子就在这里结束了而实际上并没有"
+                       "任何标点所以必须保持完整的一行才算正确。");
+    const QString txtPath = writeSample("wrap/long.txt", sentence.toUtf8() + "\n");
+    QVERIFY(!txtPath.isEmpty());
+
+    const Converter::Result r = Converter::convertFile(txtPath, "md", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString md = QString::fromUtf8(f.readAll()).trimmed();
+    QVERIFY2(md.contains(sentence), qPrintable("长段落被折行了：\n" + md));
+
+    // txt 输出同理
+    const Converter::Result r2 = Converter::convertFile(txtPath, "html", m_outDir);
+    QVERIFY2(r2.success, qPrintable(r2.message));
+}
+
+// pptx 走 Pandoc 的读取器时是「按幻灯片结构抽取文本」，
+// 比先拍平成 PDF 再提取要保真得多（标题层级、正文顺序都在）
+void TestConverter::testPptxStructureToMd()
+{
+    requireEngines();
+    if (m_pptxPath.isEmpty())
+        QSKIP("依赖 testMdToPptx 的产物");
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    const Converter::Result r = Converter::convertFile(m_pptxPath, "md", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString md = QString::fromUtf8(f.readAll());
+    QVERIFY2(md.contains("标题一"), qPrintable("幻灯片文字没抽出来：" + md));
+    QVERIFY2(md.contains("中文正文"), qPrintable("幻灯片正文丢失：" + md));
+    // 走的是结构化抽取而不是 PDF 拍平
+    QVERIFY2(r.message.contains("幻灯片结构"), qPrintable("没有走结构化抽取：" + r.message));
+}
+
+// ODT 的写出器会把 title 元数据渲染成正文第一段。我们只拿文件名当标题写
+// 进文档属性，落到 ODT 里就成了一个莫名其妙的标题，必须避免。
+void TestConverter::testOdtHasNoInjectedTitle()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    const QString srcPath = writeSample(
+        "odt/titlecheck.txt",
+        QStringLiteral("正文第一段，文件名不应该变成标题。\n").toUtf8());
+    QVERIFY(!srcPath.isEmpty());
+
+    const Converter::Result odt = Converter::convertFile(srcPath, "odt", m_outDir);
+    QVERIFY2(odt.success, qPrintable(odt.message));
+
+    const Converter::Result back = Converter::convertFile(odt.outputPath, "md", m_outDir);
+    QVERIFY2(back.success, qPrintable(back.message));
+
+    QFile f(back.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString md = QString::fromUtf8(f.readAll());
+    QVERIFY2(!md.contains("titlecheck"),
+             qPrintable("ODT 里被插入了文件名当作标题：\n" + md));
+    QVERIFY2(md.contains("正文第一段"), qPrintable("正文丢失：" + md));
 }
 
 QTEST_GUILESS_MAIN(TestConverter)
