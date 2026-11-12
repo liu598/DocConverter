@@ -17,6 +17,7 @@ public:
                     QString targetFormat,
                     QString outputDir,
                     bool outputToSourceDir,
+                    Converter::Options options,
                     Converter::CancelToken *token,
                     QObject *parent = nullptr);
 
@@ -35,5 +36,6 @@ private:
     QString m_targetFormat;
     QString m_outputDir;
     bool m_outputToSourceDir = false;
+    Converter::Options m_options;
     Converter::CancelToken *m_token = nullptr;
 };

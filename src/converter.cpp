@@ -93,6 +93,18 @@ QString searchWingetPackage(const QStringList &nameFilters, const QString &fileN
 
 QString probePandoc()
 {
+    // 0. 用户在设置里手工指定的路径最优先
+    const QString override = QSettings().value("engine/pandocPath").toString();
+    if (!override.isEmpty() && QFileInfo(override).isFile())
+        return override;
+
+    // 1. 随程序分发的内置副本（打包时可选带上，用户无需自己安装）
+    const QString bundled = QCoreApplication::applicationDirPath()
+                            + "/tools/pandoc/pandoc.exe";
+    if (QFileInfo(bundled).isFile())
+        return bundled;
+
+    // 2. PATH
     const QString onPath = QStandardPaths::findExecutable("pandoc");
     if (!onPath.isEmpty())
         return onPath;
@@ -111,6 +123,16 @@ QString probePandoc()
 
 QString probeSoffice()
 {
+    const QString override = QSettings().value("engine/sofficePath").toString();
+    if (!override.isEmpty() && QFileInfo(override).isFile())
+        return override;
+
+    // 便携版 LibreOffice 放到 tools/libreoffice/program 下也能直接用
+    const QString bundled = QCoreApplication::applicationDirPath()
+                            + "/tools/libreoffice/program/soffice.exe";
+    if (QFileInfo(bundled).isFile())
+        return bundled;
+
     const QString onPath = QStandardPaths::findExecutable("soffice");
     if (!onPath.isEmpty())
         return onPath;
@@ -651,6 +673,56 @@ bool copyDirRecursive(const QString &from, const QString &to)
     return true;
 }
 
+// 把原始字节按 BOM / UTF-8 / 系统本地编码解成 QString。
+// 预览只读前几百 KB，这里不追求对超大文件的优化。
+QString decodeTextBytes(const QByteArray &raw, QString *encoding)
+{
+    if (raw.startsWith("\xEF\xBB\xBF")) {
+        if (encoding) *encoding = "UTF-8(BOM)";
+        return QString::fromUtf8(raw.mid(3));
+    }
+    if (raw.startsWith("\xFF\xFE") || raw.startsWith("\xFE\xFF")) {
+        const bool little = raw.startsWith("\xFF\xFE");
+        QStringDecoder dec(little ? "UTF-16LE" : "UTF-16BE");
+        if (encoding) *encoding = little ? "UTF-16LE" : "UTF-16BE";
+        return dec(raw.mid(2));
+    }
+#ifdef Q_OS_WIN
+    if (!isValidUtf8(raw)) {
+        const UINT acp = GetACP();
+        // 预览时末尾可能截断在半个汉字上，去掉最后几个字节再解，避免出现半个乱码
+        for (int cut = 0; cut <= 4 && cut < raw.size(); ++cut) {
+            const QString t = decodeWithCodePage(raw.left(raw.size() - cut), acp);
+            if (!t.isEmpty()) {
+                if (encoding) *encoding = QString("CP%1").arg(acp);
+                return t;
+            }
+        }
+    }
+#endif
+    if (encoding) *encoding = "UTF-8";
+    return QString::fromUtf8(raw);
+}
+
+// HTML 预览：去掉脚本、样式和标签，只留下人能读的文字
+QString htmlToPlainRough(QString html)
+{
+    static const QRegularExpression scriptOrStyle(
+        "<(script|style)[^>]*>[\\s\\S]*?</\\1>",
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression tag("<[^>]+>");
+    static const QRegularExpression blankLines("\\n{3,}");
+
+    html.remove(scriptOrStyle);
+    html.replace(QRegularExpression("(?i)<br\\s*/?>"), "\n");
+    html.replace(QRegularExpression("(?i)</(p|div|li|h[1-6]|tr)>"), "\n");
+    html.remove(tag);
+    html.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<")
+        .replace("&gt;", ">").replace("&quot;", "\"");
+    html.replace(blankLines, "\n\n");
+    return html.trimmed();
+}
+
 } // namespace
 
 // ===========================================================================
@@ -691,6 +763,27 @@ void Converter::refreshEngines()
 #endif
     QMutexLocker locker(&engineMutex());
     cache() = EngineCache();     // 清空，下次访问重新探测
+}
+
+void Converter::setEngineOverride(const QString &engine, const QString &path)
+{
+    QSettings s;
+    if (path.trimmed().isEmpty())
+        s.remove("engine/" + engine + "Path");
+    else
+        s.setValue("engine/" + engine + "Path", QDir::toNativeSeparators(path.trimmed()));
+    refreshEngines();
+}
+
+QString Converter::engineOverride(const QString &engine)
+{
+    return QSettings().value("engine/" + engine + "Path").toString();
+}
+
+QString Converter::bundledPandocPath()
+{
+    const QString p = QCoreApplication::applicationDirPath() + "/tools/pandoc/pandoc.exe";
+    return QFileInfo(p).isFile() ? p : QString();
 }
 
 QStringList Converter::supportedTargetFormats()
@@ -735,6 +828,85 @@ QString Converter::uniqueOutputPath(const QString &path)
             return candidate;
     }
     return path;
+}
+
+
+bool Converter::extractPreviewText(const QString &path, int maxChars, QString *text,
+                                   QString *error)
+{
+    if (text)
+        text->clear();
+    auto fail = [&](const QString &msg) {
+        if (error)
+            *error = msg;
+        return false;
+    };
+
+    const QFileInfo fi(path);
+    if (!fi.isFile())
+        return fail("文件不存在");
+
+    const QString ext = normalizeExt(fi.suffix().toLower());
+    if (!isSupportedSource(path))
+        return fail("不支持预览该格式");
+
+    // ---- 纯文本类：直接读，识别编码，避免预览里出现乱码 ----
+    if (isTextSource(ext)) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly))
+            return fail("无法读取文件（可能正被占用）");
+        // 字符数 × 3 留足 UTF-8 的余量；顺序读取，不会把整个大文件读进来
+        const QByteArray raw = f.read(qMin<qint64>(fi.size(), qint64(maxChars) * 4 + 4096));
+        f.close();
+
+        QString encoding;
+        QString body = decodeTextBytes(raw, &encoding);
+        if (ext == "html")
+            body = htmlToPlainRough(body);
+        if (body.size() > maxChars)
+            body = body.left(maxChars) + "\n…（仅显示开头部分）";
+        if (text)
+            *text = body;
+        return true;
+    }
+
+    // ---- PDF：没有可靠的纯 C++ 文本层提取，交给外部阅读器 ----
+    if (ext == "pdf")
+        return fail("PDF 预览请用系统阅读器打开（扫描件还需要 OCR）");
+
+    // ---- docx / odt / epub / rtf / pptx：借 Pandoc 转成纯文本 ----
+    const QString pandoc = pandocPath();
+    if (pandoc.isEmpty())
+        return fail("需要安装 Pandoc 才能预览该格式");
+
+    QStringList args;
+    const QString reader = pandocReaderFor(ext);
+    if (!reader.isEmpty())
+        args << "-f" << reader;
+    args << "--wrap=none" << path << "-t" << "plain";
+
+    QProcess p;
+    p.setStandardInputFile(QProcess::nullDevice());
+    p.start(pandoc, args);
+    if (!p.waitForStarted(5000))
+        return fail("无法启动 Pandoc");
+    if (!p.waitForFinished(20000)) {
+        p.kill();
+        return fail("提取文字超时");
+    }
+    if (p.exitCode() != 0) {
+        const QString err = QString::fromUtf8(p.readAllStandardError()).trimmed();
+        return fail(err.isEmpty() ? QString("Pandoc 无法读取该文件") : err.right(300));
+    }
+
+    QString body = QString::fromUtf8(p.readAllStandardOutput());
+    if (body.trimmed().isEmpty())
+        return fail("没有提取到文字（可能是扫描件或纯图片文档）");
+    if (body.size() > maxChars)
+        body = body.left(maxChars) + "\n…（仅显示开头部分）";
+    if (text)
+        *text = body;
+    return true;
 }
 
 Converter::Result Converter::runProcess(const QString &program,
@@ -830,7 +1002,8 @@ Converter::Result Converter::runProcess(const QString &program,
 Converter::Result Converter::convertFile(const QString &inputPath,
                                          const QString &targetFormat,
                                          const QString &outputDir,
-                                         CancelToken *token)
+                                         CancelToken *token,
+                                         const Options &options)
 {
     Result result;
 
@@ -929,6 +1102,10 @@ Converter::Result Converter::convertFile(const QString &inputPath,
     };
 
     // --- 用 Pandoc 转换 ---
+    // 元数据标题：用户填了就用用户的，否则退回文件名（写进文档属性，不进正文）
+    const QString metaTitle = options.title.trimmed().isEmpty()
+                                  ? finalBase
+                                  : options.title.trimmed();
     auto pandocConvert = [&](const QString &input, const QString &output,
                              const QString &writer) -> Result {
         if (pandoc.isEmpty()) {
@@ -936,27 +1113,52 @@ Converter::Result Converter::convertFile(const QString &inputPath,
             r.message = "未检测到 Pandoc，无法完成该转换";
             return r;
         }
+        // 目标 md 时按用户选的方言改写 writer。gfm/commonmark 同样是 markdown
+        // 家族，后面的折行、抽图参数照样适用，所以后面统一用 effectiveWriter 判断。
+        QString effectiveWriter = writer;
+        if (writer == "markdown" && !options.markdownFlavor.isEmpty())
+            effectiveWriter = options.markdownFlavor;
+
         QStringList args;
         // 显式指定 reader：不让 Pandoc 猜后缀，txt/adoc 猜错就会解析成别的东西
         const QString reader = pandocReaderFor(ext);
         if (!reader.isEmpty())
             args << "-f" << reader;
+        // 高级用户手工追加的参数放最前面，方便覆盖默认行为
+        if (!options.extraArgs.isEmpty())
+            args << options.extraArgs;
         args << input << "-o" << output;
         if (!writer.isEmpty())
-            args << "-t" << writer;
+            args << "-t" << effectiveWriter;
+
+        // ---- 通用选项 ----
+        // pptx 是「按标题分页」的幻灯片，插目录没有意义；plain 是纯文本，也没有目录概念
+        const bool structured = (writer != "pptx" && writer != "plain");
+        if (options.toc && structured)
+            args << "--toc" << "--toc-depth=2";
+        if (options.numberSections && structured && writer != "rtf")
+            args << "--number-sections";
+        if (options.dpi > 0)
+            args << ("--dpi=" + QString::number(options.dpi));
 
         if (writer == "html") {
             // 不加 -s 得到的是 HTML 片段：没有 <head>、没有样式，浏览器打开一片白。
             args << "-s";
             args << (pandocUsesEmbedResources(pandoc) ? "--embed-resources"
                                                       : "--self-contained");
-            args << "--metadata" << ("title=" + finalBase);
+            args << "--metadata" << ("title=" + metaTitle);
+            if (!options.author.trimmed().isEmpty())
+                args << "--metadata" << ("author=" + options.author.trimmed());
         } else if (writer == "latex" || writer == "rst" || writer == "org"
                    || writer == "asciidoc") {
             // 同样是片段问题：LaTeX 缺 \documentclass、rst 缺标题，
             // 拿去编译/发布都得自己补，加 -s 才是能直接用的完整文档。
-            args << "-s" << "--metadata" << ("title=" + finalBase);
+            args << "-s" << "--metadata" << ("title=" + metaTitle);
+            if (!options.author.trimmed().isEmpty())
+                args << "--metadata" << ("author=" + options.author.trimmed());
         } else if (writer == "markdown") {
+            // 不管最终用哪个 markdown 方言（gfm/commonmark/pandoc），
+            // 抽图和折行这两件事都要做。
             // 把 docx/pdf 里的图片抽出来，否则 markdown 里只剩指向不存在文件的链接。
             // 这里必须用相对路径（配合下面的工作目录），否则 pandoc 会把链接写成
             // 临时目录的绝对路径，文件搬到输出目录后链接就全断了。
@@ -967,16 +1169,29 @@ Converter::Result Converter::convertFile(const QString &inputPath,
             // 同上，否则导出的 txt 每 72 列断一次行
             args << "--wrap=none";
         } else if (writer == "epub") {
-            // 没有目录的 epub 在阅读器里基本没法用；顺便补上元数据标题，
-            // 否则书名栏显示的是 Untitled
-            args << "--toc" << "--toc-depth=2"
-                 << "--metadata" << ("title=" + finalBase);
+            // 补上元数据标题，否则书名栏显示的是 Untitled。
+            // 目录已由上面的通用选项处理（--toc / --toc-depth=2）。
+            args << "--metadata" << ("title=" + metaTitle);
+            if (!options.author.trimmed().isEmpty())
+                args << "--metadata" << ("author=" + options.author.trimmed());
         } else if (writer == "docx" || writer == "rtf") {
             // 只写进文件属性（文档信息里的标题），不会往正文插标题页。
             // odt 不在此列：ODT 写出器会把 title 渲染成正文第一段的标题，
             // 而这里的 title 只是文件名，插进正文纯属噪音。
-            args << "--metadata" << ("title=" + finalBase);
+            args << "--metadata" << ("title=" + metaTitle);
+            if (!options.author.trimmed().isEmpty())
+                args << "--metadata" << ("author=" + options.author.trimmed());
         }
+
+        // Word 样式模板：只对 docx 目标有效。Pandoc 会用模板里的样式表渲染
+        // 标题/正文/表格，是「输出排版可控」最直接的手段。
+        // 工作目录已被切到暂存目录，这里必须是绝对路径。
+        if (writer == "docx" && !options.referenceDoc.isEmpty()) {
+            const QFileInfo ref(options.referenceDoc);
+            if (ref.isFile())
+                args << ("--reference-doc=" + ref.absoluteFilePath());
+        }
+
         // 工作目录设成暂存目录：-o 仍然用绝对路径，
         // 但 --extract-media 的相对路径会落在暂存目录里
         return runProcess(pandoc, args, timeoutMs, token, staging.path());

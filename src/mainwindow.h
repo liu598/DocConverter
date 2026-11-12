@@ -1,20 +1,23 @@
 #pragma once
 
+#include <QJsonArray>
 #include <QMainWindow>
 #include <QPointer>
 #include <QThread>
 
 #include "converter.h"
 
-class QListWidget;
-class QListWidgetItem;
+class QCheckBox;
 class QComboBox;
 class QLineEdit;
-class QCheckBox;
-class QPushButton;
+class QListWidget;
+class QListWidgetItem;
 class QPlainTextEdit;
 class QProgressBar;
-class QLabel;
+class QPushButton;
+class QSpinBox;
+class QToolButton;
+class QWidget;
 class ConverterWorker;
 class InstallerWorker;
 
@@ -43,6 +46,18 @@ private slots:
     void onSaveLog();
     void startEngineCheck();
 
+    // 高级选项 / 预设
+    void onToggleAdvanced();
+    void onSaveProfile();
+    void onDeleteProfile();
+    void onProfileActivated(int index);
+
+    // 预览 / 历史 / 外观
+    void onPreviewSelected();
+    void onListContextMenu(const QPoint &pos);
+    void showHistory();
+    void onChooseEnginePath(const QString &engine);
+
     // 安装 worker 回调
     void onInstallLog(const QString &text);
     void onInstallStepResult(bool ok, const QString &message);
@@ -57,6 +72,8 @@ private slots:
 
 private:
     void buildUi();
+    void buildMenus();
+    QWidget *buildAdvancedPanel();
     void loadSettings();
     void saveSettings();
 
@@ -67,6 +84,19 @@ private:
     void updateControls();
     void setItemStatus(int index, int state, const QString &tooltip);
     void updateEngineLabel(const QString &pandoc, const QString &soffice, bool pdf2docx);
+    void updateFormatDependentOptions();
+
+    // 高级选项
+    Converter::Options collectOptions() const;
+    void applyOptions(const Converter::Options &o);
+    void refreshProfileCombo(const QString &selectName = QString());
+
+    // 主题 / 历史
+    void applyTheme(const QString &theme);
+    void loadHistory();
+    void saveHistory();
+    void addHistory(const QString &source, const QString &target, const QString &output,
+                    const QString &status, const QString &message);
 
     bool isBusy() const { return m_busy || m_installing; }
     bool ensureEnginesOrWarn();
@@ -92,6 +122,20 @@ private:
     QLabel *m_engineStatusLabel = nullptr;
     QLabel *m_progressLabel = nullptr;
 
+    // 高级选项
+    QToolButton *m_advancedToggle = nullptr;
+    QWidget *m_advancedPanel = nullptr;
+    QCheckBox *m_tocCheck = nullptr;
+    QCheckBox *m_numberCheck = nullptr;
+    QLineEdit *m_refDocEdit = nullptr;
+    QPushButton *m_refDocBrowseBtn = nullptr;
+    QPushButton *m_refDocClearBtn = nullptr;
+    QComboBox *m_mdFlavorCombo = nullptr;
+    QSpinBox *m_dpiSpin = nullptr;
+    QLineEdit *m_titleEdit = nullptr;
+    QLineEdit *m_authorEdit = nullptr;
+    QComboBox *m_profileCombo = nullptr;
+
     // 状态
     QPointer<QThread> m_engineThread;
     QPointer<QThread> m_workerThread;
@@ -106,6 +150,10 @@ private:
     bool m_sofficeReady = false;
     bool m_pdf2docxReady = false;
     int m_totalCount = 0;
+
+    QString m_theme = "system";
+    QString m_currentTarget;      // 本轮转换的目标格式，写历史时用
+    QJsonArray m_history;
 
     // 逐项统计，用于最后汇报
     int m_successCount = 0;

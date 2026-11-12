@@ -36,6 +36,29 @@ public:
         QString output;         // 引擎 stdout/stderr 的尾部，便于排查与识别引擎警告
     };
 
+    // 输出选项：对应 Pandoc 的一组常用参数。
+    // 只作用于走 Pandoc 的链路；LibreOffice 直转的路径不受影响（它没有等价开关）。
+    struct Options
+    {
+        bool toc = false;             // --toc          生成目录
+        bool numberSections = false;  // --number-sections  章节自动编号
+        QString referenceDoc;         // --reference-doc    用 Word 模板套样式（仅 docx 目标）
+        QString markdownFlavor;       // 目标 md 时的方言：""(pandoc) / gfm / commonmark
+        QString title;                // 元数据标题，空则退回文件名
+        QString author;               // 元数据作者
+        int dpi = 0;                  // --dpi，0 表示不指定（影响图片换算尺寸）
+        QStringList extraArgs;        // 高级用户手工追加的 Pandoc 参数
+
+        bool operator==(const Options &o) const
+        {
+            return toc == o.toc && numberSections == o.numberSections
+                   && referenceDoc == o.referenceDoc && markdownFlavor == o.markdownFlavor
+                   && title == o.title && author == o.author && dpi == o.dpi
+                   && extraArgs == o.extraArgs;
+        }
+        bool operator!=(const Options &o) const { return !(*this == o); }
+    };
+
     // 取消令牌。用一个原子标志在 UI 线程与工作线程之间传递取消请求，
     // 不依赖事件循环，线程安全。
     struct CancelToken
@@ -59,6 +82,17 @@ public:
     // 当前进程的环境变量（PATH）不会自动刷新，需要从注册表重新读取。
     static void refreshEngines();
 
+    // ---- 引擎路径覆盖 ----
+    // 有些机器上 Pandoc 装在 PATH 之外（绿色版、自定义目录），或者用户想
+    // 指定某个特定版本。这两个函数把用户选择持久化到 QSettings，
+    // 探测时优先级高于 PATH。传空字符串表示恢复自动探测。
+    static void setEngineOverride(const QString &engine, const QString &path);
+    static QString engineOverride(const QString &engine);
+
+    // 随程序分发的内置引擎（<exe目录>/tools/pandoc/pandoc.exe）。
+    // 打包时选装 pandoc 就会存在，用户无需自己安装。
+    static QString bundledPandocPath();
+
     // ---- 元信息 ----
     static QStringList supportedTargetFormats();
     // 支持的源文件后缀（不含点、不含通配符），UI 用它拼过滤器
@@ -73,7 +107,14 @@ public:
     static Result convertFile(const QString &inputPath,
                               const QString &targetFormat,
                               const QString &outputDir,
-                              CancelToken *token = nullptr);
+                              CancelToken *token = nullptr,
+                              const Options &options = Options());
+
+    // 从文档里抽出纯文本，用于界面预览。
+    // 只读取前 maxChars 个字符，不会把大文件整个读进内存。
+    // 返回 false 表示该格式无法快速抽取（例如图片型 PDF）。
+    static bool extractPreviewText(const QString &path, int maxChars, QString *text,
+                                   QString *error = nullptr);
 
 private:
     static Result runProcess(const QString &program,

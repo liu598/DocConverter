@@ -40,6 +40,8 @@ private slots:
     void testLongParagraphNotWrapped();
     void testPptxStructureToMd();
     void testOdtHasNoInjectedTitle();
+    void testOptionsHtmlMetadataAndToc();
+    void testMarkdownFlavorGfm();
 
 private:
     void requireEngines();
@@ -475,6 +477,64 @@ void TestConverter::testOdtHasNoInjectedTitle()
     QVERIFY2(!md.contains("titlecheck"),
              qPrintable("ODT 里被插入了文件名当作标题：\n" + md));
     QVERIFY2(md.contains("正文第一段"), qPrintable("正文丢失：" + md));
+}
+
+
+// 高级选项应真实传给 Pandoc：自定义标题 / 作者进元数据，TOC 生成目录
+void TestConverter::testOptionsHtmlMetadataAndToc()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    Converter::Options o;
+    o.toc = true;
+    o.title = QStringLiteral("自定义标题ABC");
+    o.author = QStringLiteral("张三");
+    o.dpi = 150;
+
+    const Converter::Result r = Converter::convertFile(m_mdPath, "html", m_outDir,
+                                                       nullptr, o);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString html = QString::fromUtf8(f.readAll());
+    QVERIFY2(html.contains("自定义标题ABC"),
+             "用户填写的标题没有进入 HTML 元数据");
+    QVERIFY2(html.contains("张三"), "作者没有进入 HTML 元数据");
+    QVERIFY2(html.contains("TOC"), "开启生成目录后 HTML 里没有 TOC");
+}
+
+// Markdown 方言选项：gfm 表达不了脚注，应摊平进正文而不是丢内容
+void TestConverter::testMarkdownFlavorGfm()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    // md -> md 会被「同格式跳过」拦下，所以用带脚注的 HTML 当源
+    const QString src = writeSample("flavor.html",
+        "<html><head><meta charset=\"utf-8\"></head><body>"
+        "<h1>标题</h1>"
+        "<p>正文带脚注<sup class=\"footnote-ref\"><a href=\"#fn1\" id=\"fnref1\">[1]</a></sup>。</p>"
+        "<section class=\"footnotes footnotes-end-of-document\">"
+        "<ol><li id=\"fn1\"><p>这是脚注内容。"
+        "<a href=\"#fnref1\" class=\"footnote-back\">\u21a9</a></p></li></ol></section>"
+        "</body></html>");
+    QVERIFY(!src.isEmpty());
+
+    Converter::Options o;
+    o.markdownFlavor = "gfm";
+    const Converter::Result r = Converter::convertFile(src, "md", m_outDir, nullptr, o);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString out = QString::fromUtf8(f.readAll());
+    QVERIFY2(out.contains("这是脚注内容"), "脚注内容丢失");
+    QVERIFY2(!out.contains("[^1]:"),
+             qPrintable("gfm 输出里不应保留脚注语法：\n" + out));
 }
 
 QTEST_GUILESS_MAIN(TestConverter)

@@ -20,8 +20,18 @@
         Build, run the test suite, deploy into the installer package directory
         and regenerate DocConverter_Setup.exe.
 
+.EXAMPLE
+    .\scripts\build_release.ps1 -Package -BundlePandoc
+        Same as above, but also bundle pandoc.exe so the installer works
+        without requiring users to install Pandoc.
+
 .PARAMETER QtPath
     Qt kit directory, e.g. D:\Qt\6.11.1\msvc2022_64. Auto-detected when omitted.
+
+.PARAMETER BundlePandoc
+    Copy the locally installed pandoc.exe into tools\pandoc\ of the output
+    directory. The app prefers the bundled copy, so users do not need to
+    install Pandoc themselves (useful for an offline / portable build).
 #>
 
 [CmdletBinding()]
@@ -32,6 +42,7 @@ param(
     [string]  $Configuration = "Release",
     [switch]  $Test,
     [switch]  $Package,
+    [switch]  $BundlePandoc,
     [switch]  $Clean
 )
 
@@ -201,11 +212,53 @@ $sizeMB = [math]::Round(((Get-ChildItem $InstallDir -Recurse -File |
     Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Host "  Deployed size: $sizeMB MB"
 
+# ---------------------------------------------------------------------------
+# 可选：把本机的 pandoc.exe 一起打进产物（tools/pandoc/）。
+# 程序会优先使用这个内置副本，用户机器上不装 Pandoc 也能转换 md/txt/html/
+# epub/docx 等；涉及 PDF 的转换仍然需要 LibreOffice。
+# 产出体积会明显增大（pandoc.exe 约 220MB），适合做「绿色版/离线版」。
+# ---------------------------------------------------------------------------
+if ($BundlePandoc) {
+    Write-Step "Bundling pandoc"
+    $pandocSrc = $null
+    $cmd = Get-Command pandoc.exe -ErrorAction SilentlyContinue
+    if ($cmd) { $pandocSrc = $cmd.Source }
+    if (-not $pandocSrc) {
+        $candidates = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Directory |
+            Where-Object { $_.Name -like 'JohnMacFarlane.Pandoc*' }
+        foreach ($c in $candidates) {
+            $found = Get-ChildItem $c.FullName -Recurse -Filter 'pandoc.exe' |
+                Select-Object -First 1
+            if ($found) { $pandocSrc = $found.FullName; break }
+        }
+    }
+    if (-not $pandocSrc) { throw "BundlePandoc: 未找到本机的 pandoc.exe，请先安装 Pandoc" }
+
+    $bundleDir = Join-Path $InstallDir 'tools\pandoc'
+    New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
+    Copy-Item $pandocSrc (Join-Path $bundleDir 'pandoc.exe') -Force
+    $pandocMB = [math]::Round((Get-Item (Join-Path $bundleDir 'pandoc.exe')).Length / 1MB, 1)
+    Write-Host "  Bundled pandoc.exe ($pandocMB MB) -> $bundleDir"
+}
+
 if ($Package) {
     Write-Step "Building installer"
     $BinaryCreator = Find-BinaryCreator $QtKit
     $IconSource = Join-Path $ProjectDir 'resources\app_icon.ico'
     Copy-Item $IconSource (Join-Path $InstallerDir 'config\app_icon.ico') -Force
+
+    # 版本号同步：exe 的版本资源由 CMakeLists 的 project() 生成，
+    # 安装包 XML 必须跟它一致，否则「程序 v1.4.0 / 安装器 v1.0.1」会对不上。
+    $exeVersion = (Get-Item (Join-Path $InstallDir 'DocConverter.exe')).VersionInfo.ProductVersion
+    foreach ($xml in @('config\config.xml', 'packages\com.docconverter.app\meta\package.xml')) {
+        $xmlPath = Join-Path $InstallerDir $xml
+        if (Test-Path $xmlPath) {
+            $content = Get-Content $xmlPath -Raw -Encoding UTF8
+            $content = $content -replace '<Version>[^<]+</Version>', "<Version>$exeVersion</Version>"
+            Set-Content -Path $xmlPath -Value $content -Encoding UTF8 -NoNewline
+            Write-Host "  $xml -> Version $exeVersion"
+        }
+    }
 
     $SetupExe = Join-Path $InstallerDir 'DocConverter_Setup.exe'
     # 不预先删除旧包：binarycreator 会直接原地覆盖，

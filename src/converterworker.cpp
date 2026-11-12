@@ -7,6 +7,7 @@ ConverterWorker::ConverterWorker(QStringList files,
                                  QString targetFormat,
                                  QString outputDir,
                                  bool outputToSourceDir,
+                                 Converter::Options options,
                                  Converter::CancelToken *token,
                                  QObject *parent)
     : QObject(parent)
@@ -14,6 +15,7 @@ ConverterWorker::ConverterWorker(QStringList files,
     , m_targetFormat(std::move(targetFormat))
     , m_outputDir(std::move(outputDir))
     , m_outputToSourceDir(outputToSourceDir)
+    , m_options(std::move(options))
     , m_token(token)
 {
 }
@@ -38,7 +40,8 @@ void ConverterWorker::run()
                                 ? QFileInfo(input).absolutePath()
                                 : m_outputDir;
 
-        const Converter::Result r = Converter::convertFile(input, m_targetFormat, dir, m_token);
+        const Converter::Result r = Converter::convertFile(input, m_targetFormat, dir,
+                                                           m_token, m_options);
 
         if (r.canceled) {
             canceled = true;

@@ -15,6 +15,14 @@
 - **两种输出位置**：指定目录，或「输出到源文件所在目录」
 - **不覆盖已有文件**：同名时自动生成 `报告 (1).pdf`，绝不静默盖掉你的文件
 - **记住上次设置**：目标格式、输出目录、窗口位置都会记忆（QSettings）
+- **高级选项 + 预设方案**：生成目录（TOC）、章节自动编号、Word 样式模板（`--reference-doc`）、
+  Markdown 方言（Pandoc / GFM / CommonMark）、图片 DPI、文档标题 / 作者；
+  一套配置可存成命名预设（如「论文 PDF」），下拉即换
+- **转换历史**：最近 300 条记录落盘保存（JSON），可查看结果、打开输出文件、一键重新加入列表
+- **双击预览**：转换前先看看文件内容（txt/md/html 直接读，docx/epub/rtf/pptx 由 Pandoc 抽取文字，后台线程不卡界面）
+- **深色 / 浅色主题**：跟随系统，或手动固定（菜单「设置 → 外观」）
+- **指定引擎路径**：Pandoc / LibreOffice 装在 PATH 之外也能用（菜单「设置」），也可以放进程序目录 `tools/pandoc/`（绿色版自带引擎，无需安装）
+- **右键菜单**：预览、用默认程序打开、在资源管理器中显示、复制路径
 - **实时日志**：带时间戳，失败原因（引擎原始报错）会完整打印出来，可一键「保存日志」为 txt
 - **单实例运行**：重复启动不会开出第二个窗口，避免两个实例同时写同一个输出目录
 - **扫描件会提醒**：PDF 转出的文字几乎为空时，日志会明确提示「可能是图片型扫描件，需要先 OCR」
@@ -97,6 +105,7 @@ Python 会扫描 PATH 与 `C:\Python3xx` / `%LOCALAPPDATA%\Programs\Python\Pytho
 ```powershell
 .\scripts\build_release.ps1                 # 只编译 + 部署到 .\deploy
 .\scripts\build_release.ps1 -Test -Package  # 编译 + CTest + 部署进安装包目录 + 重新打包
+.\scripts\build_release.ps1 -Package -BundlePandoc  # 打包并把本机 pandoc.exe 一起内置（离线版）
 .\scripts\build_release.ps1 -Clean          # 先清空构建目录再编译
 ```
 
@@ -199,6 +208,27 @@ DocConverter/
 ```
 
 ## 变更记录
+
+### 1.4.0
+主打「好用、可控」：参考同类开源项目（pandoc-ui、Pandoc-GUI、File Wizard 等）补齐的差异化能力。
+
+- **高级转换选项**：生成目录（TOC）、章节自动编号、Word 样式模板（`--reference-doc`）、
+  Markdown 方言（Pandoc / GFM / CommonMark）、图片 DPI、自定义文档标题 / 作者；
+  不支持的目标格式会自动灰掉对应选项，避免「勾了不生效」
+- **预设方案**：目标格式 + 高级选项打包存为命名预设（保存在 QSettings），
+  下拉即切换；常用场景（论文 PDF、给同事的 Markdown）一键套用
+- **转换历史**：最近 300 条落盘 JSON（`AppData/LocalTools/DocConverter/history.json`），
+  对话框里可打开输出文件 / 所在目录 / 重新加入列表 / 清空
+- **文件预览**：双击列表项（或 Ctrl+P）弹出预览窗口，txt/md/html 直接读、
+  docx/epub/rtf/pptx 由 Pandoc 后台抽取纯文本；PDF 引导用系统阅读器
+- **深色主题**：跟随系统或手动固定（Qt 6.8 ColorScheme），控件与标题栏一起切换
+- **内置引擎支持**：程序目录下 `tools/pandoc/pandoc.exe` 会被优先使用；
+  `build_release.ps1 -BundlePandoc` 一条命令产出「离线全内置版」（用户无需装 Pandoc）
+- **引擎路径可在界面指定**：绿色版 / 自定义目录的 Pandoc、LibreOffice 不再依赖 PATH
+- **右键菜单**：预览 / 打开 / 资源管理器中显示 / 复制路径 / 移除，附 Delete、Ctrl+Return 快捷键
+- 安装包 XML 的版本号现在由打包脚本从 exe 读取并自动写入（此前停留在 1.0.1）
+- 菜单栏加入文件 / 查看 / 设置 / 帮助；「已知限制」搬进了帮助菜单
+- 测试新增 2 条：HTML 元数据与 TOC 选项真实生效、gfm 方言的脚注摊平（26 条用例）
 
 ### 1.3.0
 主打「转得准」：修掉几处会损坏内容或静默出错的链路。

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # 版本号的唯一来源：改这里，exe 资源、程序标题、安装包都跟着变
-project(DocConverter VERSION 1.3.0 LANGUAGES CXX)
+project(DocConverter VERSION 1.4.0 LANGUAGES CXX)
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}/deploy" CACHE PATH "安装/部署目录")
 
@@ -43,6 +43,8 @@ add_executable(DocConverter WIN32
     src/main.cpp
     src/mainwindow.cpp
     src/mainwindow.h
+    src/previewdialog.cpp
+    src/previewdialog.h
     src/converter.cpp
     src/converter.h
     src/converterworker.cpp
