@@ -7,7 +7,9 @@
 // Converter 负责实际的格式转换工作。
 // 它本身不实现任何编解码逻辑，而是调用系统上已安装的
 // Pandoc 和 LibreOffice(soffice) 命令行工具来完成转换，
-// 这样可以稳定支持 docx/doc/odt/rtf/txt/html/md/epub/pdf
+// 这样可以稳定支持
+//   docx / doc / odt / rtf / txt / html / md / epub / pdf /
+//   pptx / tex / rst / org / adoc
 // 之间的相互转换，且转换质量有保障。
 //
 // 设计要点（相对于最初版本的改动）：
@@ -57,6 +59,8 @@ public:
 
     // ---- 元信息 ----
     static QStringList supportedTargetFormats();
+    // 支持的源文件后缀（不含点、不含通配符），UI 用它拼过滤器
+    static QStringList supportedSourceExtensions();
     // 是否是我们支持的源文件格式（用于拖拽时给出明确提示）
     static bool isSupportedSource(const QString &path);
 
@@ -73,5 +77,6 @@ private:
     static Result runProcess(const QString &program,
                              const QStringList &args,
                              int timeoutMs,
-                             CancelToken *token = nullptr);
+                             CancelToken *token = nullptr,
+                             const QString &workingDir = QString());
 };

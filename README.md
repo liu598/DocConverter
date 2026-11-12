@@ -1,7 +1,8 @@
 # 文档格式转换工具（DocConverter）
 
 一个基于 C++ / Qt 6 的 Windows 桌面工具，支持在常见文档格式之间批量转换：
-`docx / doc / odt / rtf / txt / html / md / epub / pdf`
+
+`docx / doc / odt / rtf / txt / html / md / epub / pdf / pptx / tex / rst / org / adoc`
 
 工具本身不解析任何文档格式，而是调度两个成熟的开源引擎（Pandoc、LibreOffice），
 外加可选的 pdf2docx，把「格式组合」交给最擅长的那个引擎去做。
@@ -22,17 +23,24 @@
 
 | 源 → 目标 | 走的路径 |
 |---|---|
-| 任意文档 → PDF | LibreOffice 直接转；md / txt / epub / odt 先由 Pandoc 转 docx 再排版成 PDF（避开 LaTeX 依赖） |
-| PDF → docx | 装了 pdf2docx 就用它（排版还原好），失败自动退回 LibreOffice |
-| PDF → md / html / epub | PDF → docx（LibreOffice）→ 目标格式（Pandoc） |
-| PDF → txt / odt / rtf 等 | LibreOffice + `writer_pdf_import` 过滤器 |
-| 其余文档互转 | 优先 Pandoc（快、保真），失败回退 LibreOffice |
+| 任意文档 → PDF | LibreOffice 直接转；md / txt / epub / odt / tex / rst / org / adoc 先由 Pandoc 转 docx 再排版成 PDF（避开 LaTeX 依赖） |
+| 任意文档 → pptx | Pandoc：按标题层级自动分页 |
+| 任意文档 → tex / rst / org / adoc | Pandoc 对应 writer，输出带 `-s` 的完整文档（LaTeX 有 `\documentclass`，rst/org/adoc 有标题） |
+| PDF → docx | 优先 pdf2docx（正文还原成真段落），没装则退回 LibreOffice |
+| PDF → md / html / txt / epub / tex / rst / org / adoc | PDF → docx（pdf2docx 优先）→ 目标格式（Pandoc） |
+| PDF → odt / rtf / doc | LibreOffice + `writer_pdf_import` 过滤器 |
+| PPTX → 其他格式 | 先由 LibreOffice 按页转成 PDF，再走上面的 PDF 链路 |
+| 其余文档互转 | 优先 Pandoc（快、保真），失败回退 LibreOffice；`.doc` 与 `.pptx` 直接交给 LibreOffice |
 
 几个容易踩的坑已经处理掉了：
 
 - PDF 必须显式指定 `writer_pdf_import`，否则 LibreOffice 用 Draw 打开，报 `no export filter`
+- **LibreOffice 的 PDF 导入会把正文塞进文本框**，Pandoc 读 docx 时完全看不到（只剩标题）。
+  所以 PDF 转文本格式必须先过 pdf2docx，没有它就只能退回 LibreOffice、正文可能丢失
+- .doc 与 .pptx 是 Pandoc 读不了的（老二进制格式 / 只认简单版面），别再白跑一次
 - HTML 输出加了 `--standalone --embed-resources`，得到带样式的完整页面并把图片内嵌进去（原来是缺 `<head>` 的裸片段）
-- 转 Markdown 时用 `--extract-media` 把图片抽到 `文件名_media/` 目录，链接不会失效
+- 转 Markdown 时用 `--extract-media` 把图片抽到 `文件名_media/` 目录，且**用相对路径写入链接**，
+  文件搬到输出目录后链接依然有效
 - LibreOffice 每次调用都给独立的 `-env:UserInstallation` 配置目录，**你开着 LibreOffice 也不影响转换**
 - 转换结果先落临时目录，**校验文件确实存在且非空**才搬进输出目录（LibreOffice 有时退出码 0 但什么都没生成）
 
@@ -42,9 +50,11 @@
 
 - **Pandoc**：https://pandoc.org/installing.html
 - **LibreOffice**：https://www.libreoffice.org/download/download/
-- **pdf2docx**（可选，提升 PDF→Word 精度）：`pip install pdf2docx`
+- **pdf2docx**（可选，但强烈建议：PDF → Word 的排版还原、以及 PDF → 文本类格式的正文提取都靠它）：`pip install pdf2docx`
 
 路径探测顺序：系统 PATH → 常见安装位置 → winget 包目录（`%LOCALAPPDATA%\Microsoft\WinGet\Packages`）。
+Python 会扫描 PATH 与 `C:\Python3xx` / `%LOCALAPPDATA%\Programs\Python\Python3xx` 等常见位置，
+并**优先选用装了 pdf2docx 的那个解释器**（机器上装多个 Python 很常见）。
 
 **一键安装**：点界面上的「一键安装缺失组件」，会通过 winget 静默安装缺的那个。
 安装跑在后台线程，日志实时滚动、界面不假死；装完会重新读取注册表里的 PATH 并清掉引擎缓存，**不用重启程序**即可识别。
@@ -123,6 +133,9 @@ D:\Qt\Tools\QtInstallerFramework\4.11\bin\binarycreator.exe ^
 ## 已知限制
 
 - **扫描件 PDF（图片型）** 没有 OCR，转出来基本是空的——日志会提示需要先做 OCR，但工具本身不提供识别能力。
+- **PDF → 文本类格式依赖 pdf2docx**：没装时退回 LibreOffice，正文可能只剩标题（它的 PDF 导入把内容放进了文本框）。
+- **PPTX → 文档格式是「按页拍平」的**：先转 PDF 再转文档，不是可编辑的幻灯片大纲。
+- **.tex 输出依赖 xelatex 才能出中文 PDF**：转成 .tex 没问题，但拿它自己去编译需要装 TeX 发行版。
 - Markdown → PDF 的样式比较朴素（Pandoc 生成 docx 的默认样式）。
 - 批量转换是**串行**的：LibreOffice 本身不适合并发起多个实例，串行反而更快更稳。
 - 没有代码签名，首次运行可能被 SmartScreen 拦一下（点「更多信息 → 仍要运行」）。
@@ -155,6 +168,21 @@ DocConverter/
 ```
 
 ## 变更记录
+
+### 1.2.0
+- 新增 6 种目标格式：**doc**（Word 97-2003）、**pptx**（幻灯片）、**tex**（LaTeX）、
+  **rst**（reStructuredText）、**org**（Org-mode）、**adoc**（AsciiDoc），源格式同步支持
+- 下拉框每个格式都有悬停说明，缩写不再是天书
+- `-s` 让 LaTeX / rst / org / adoc 输出完整文档（之前是没有导言区的片段）
+- 修复 PDF → md/html/epub 必失败：中间 docx 的文件名之前是自造的，LibreOffice 根本不会生成它
+- PDF → 文本格式改为优先用 pdf2docx 生成中间 docx：LibreOffice 的 PDF 导入会把正文塞进文本框，
+  Pandoc 读不到，导致转出来只有标题
+- PDF → 文本类目标失败时会退回 LibreOffice 再试一次，不再直接报错
+- PPTX → 非 PDF 目标自动「PPTX → PDF → 目标」两段转（Impress 写不出 docx）
+- Markdown 导出的图片链接改为相对路径（之前指向临时目录，文件一搬就全断）
+- Python 探测扫描多个解释器并优先选装了 pdf2docx 的那个
+- `.doc` / `.pptx` 不再白跑一次 Pandoc，日志里不再出现无意义的失败噪音
+- 测试新增：格式清单一致性、md→tex、md→pptx、docx→doc、pdf→markdown（正文+相对链接）
 
 ### 1.1.0
 - 组件安装改为后台线程：winget 装 LibreOffice 期间界面不再假死，日志实时输出

@@ -142,34 +142,46 @@ bool pythonWorks(const QString &exePath)
     return p.exitCode() == 0;
 }
 
-QString probePython()
+// 列出所有看起来可用的 python 解释器。
+// 一台机器上装好几个 Python 很常见（系统级、用户级、各种工具自带），
+// 而 pdf2docx 往往只装在其中一个里，所以要把候选都收集起来再挑。
+QStringList probePythons()
 {
-    const QStringList names = {"python", "python3", "py"};
-    for (const QString &n : names) {
-        const QString path = QStandardPaths::findExecutable(n);
-        if (pythonWorks(path))
-            return path;
-    }
-    // PATH 里没有时，看看标准安装位置
+    QStringList found;
+
+    auto addIfWorks = [&found](const QString &exe) {
+        if (exe.isEmpty() || found.contains(exe))
+            return;
+        if (pythonWorks(exe))
+            found << exe;
+    };
+
+    // 1. PATH 上的
+    for (const QString &n : {"python", "python3", "py"})
+        addIfWorks(QStandardPaths::findExecutable(n));
+
+    // 2. 常见安装目录：C:/Python312、%LOCALAPPDATA%/Programs/Python/Python312、
+    //    %ProgramFiles%/Python312 之类
+    QStringList roots;
+    for (const QString &drive : {"C:/", "D:/"})
+        roots << drive;
     const QString local = qEnvironmentVariable("LOCALAPPDATA");
-    if (!local.isEmpty()) {
-        const QStringList guess = {
-            local + "/Programs/Python",
-            qEnvironmentVariable("ProgramFiles") + "/Python"
-        };
-        for (const QString &g : guess) {
-            QDir dir(g);
-            if (!dir.exists())
-                continue;
-            const QStringList versions = dir.entryList({"Python3*"}, QDir::Dirs | QDir::NoDotAndDotDot);
-            for (const QString &v : versions) {
-                const QString exe = dir.filePath(v + "/python.exe");
-                if (pythonWorks(exe))
-                    return exe;
-            }
-        }
+    if (!local.isEmpty())
+        roots << (local + "/Programs/Python");
+    const QString pf = qEnvironmentVariable("ProgramFiles");
+    if (!pf.isEmpty())
+        roots << pf + "/Python";
+
+    for (const QString &root : roots) {
+        QDir dir(root);
+        if (!dir.exists())
+            continue;
+        // 只认 Python3x 这种目录名，避免把整个盘扫一遍
+        const QStringList dirs = dir.entryList({"Python3*"}, QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &d : dirs)
+            addIfWorks(dir.filePath(d + "/python.exe"));
     }
-    return QString();
+    return found;
 }
 
 bool probePdf2docx(const QString &python)
@@ -196,8 +208,19 @@ void ensureProbed()
         return;
     c.pandoc = probePandoc();
     c.soffice = probeSoffice();
-    c.python = probePython();
-    c.pdf2docx = probePdf2docx(c.python);
+
+    // 优先挑装了 pdf2docx 的那个解释器：PDF 转 Word/文本的还原质量差很多
+    const QStringList pythons = probePythons();
+    for (const QString &py : pythons) {
+        if (probePdf2docx(py)) {
+            c.python = py;
+            c.pdf2docx = true;
+            break;
+        }
+    }
+    if (c.python.isEmpty() && !pythons.isEmpty())
+        c.python = pythons.first();
+
     c.probed = true;
 }
 
@@ -281,9 +304,17 @@ QString normalizeExt(const QString &ext)
         return "md";
     if (ext == "text")
         return "txt";
+    if (ext == "latex")
+        return "tex";
+    if (ext == "asciidoc" || ext == "ad")
+        return "adoc";
+    if (ext == "rest")
+        return "rst";
     return ext;
 }
 
+// 目标格式 -> Pandoc 的 writer 名。
+// 表里没有的目标（目前只有 doc）说明 Pandoc 写不出来，直接交给 LibreOffice。
 QString pandocWriterFor(const QString &target)
 {
     static const QHash<QString, QString> map = {
@@ -293,9 +324,31 @@ QString pandocWriterFor(const QString &target)
         {"txt",  "plain"},
         {"html", "html"},
         {"md",   "markdown"},
-        {"epub", "epub"}
+        {"epub", "epub"},
+        {"pptx", "pptx"},
+        {"tex",  "latex"},
+        {"rst",  "rst"},
+        {"org",  "org"},
+        {"adoc", "asciidoc"}
     };
     return map.value(target);
+}
+
+// 这些格式是「标记/纯文本」，直接交给 Pandoc 排版成 PDF 会依赖 LaTeX，
+// 因此统一先转 docx 再让 LibreOffice 出 PDF，成功率更高。
+bool isMarkupSource(const QString &ext)
+{
+    static const QStringList markup = {"md", "txt", "epub", "odt",
+                                       "tex", "rst", "org", "adoc"};
+    return markup.contains(ext);
+}
+
+// Pandoc 读不了的源格式：老的二进制 .doc，以及只适合简单版面的 .pptx。
+// 这两类交给 LibreOffice，别白跑一次 Pandoc（还会在日志里留下失败噪音）。
+bool pandocCanRead(const QString &ext)
+{
+    static const QStringList unreadable = {"doc", "pptx"};
+    return !unreadable.contains(ext);
 }
 
 // pandoc 2.19 起 --self-contained 改名为 --embed-resources
@@ -421,14 +474,25 @@ void Converter::refreshEngines()
 
 QStringList Converter::supportedTargetFormats()
 {
-    return {"pdf", "docx", "odt", "rtf", "txt", "html", "md", "epub"};
+    // 顺序即下拉框顺序：常用的放前面
+    return {"pdf", "docx", "doc", "odt", "rtf", "txt", "html", "md", "epub",
+            "pptx", "tex", "rst", "org", "adoc"};
+}
+
+QStringList Converter::supportedSourceExtensions()
+{
+    // 不含通配符、不含点，UI 自己拼 *.xxx
+    return {"pdf", "docx", "doc", "odt", "rtf", "txt", "html", "htm",
+            "md", "markdown", "epub", "pptx", "tex", "rst", "org",
+            "adoc", "asciidoc"};
 }
 
 bool Converter::isSupportedSource(const QString &path)
 {
     const QString ext = normalizeExt(QFileInfo(path).suffix().toLower());
     static const QStringList known = {
-        "pdf", "docx", "doc", "odt", "rtf", "txt", "html", "md", "epub"
+        "pdf", "docx", "doc", "odt", "rtf", "txt", "html", "md", "epub",
+        "pptx", "tex", "rst", "org", "adoc"
     };
     return known.contains(ext);
 }
@@ -455,7 +519,8 @@ QString Converter::uniqueOutputPath(const QString &path)
 Converter::Result Converter::runProcess(const QString &program,
                                         const QStringList &args,
                                         int timeoutMs,
-                                        CancelToken *token)
+                                        CancelToken *token,
+                                        const QString &workingDir)
 {
     Result r;
     if (program.isEmpty()) {
@@ -471,6 +536,8 @@ Converter::Result Converter::runProcess(const QString &program,
     QProcess p;
     p.setProgram(program);
     p.setArguments(args);
+    if (!workingDir.isEmpty())
+        p.setWorkingDirectory(workingDir);
     p.setStandardInputFile(QProcess::nullDevice());
     p.start();
 
@@ -642,20 +709,29 @@ Converter::Result Converter::convertFile(const QString &inputPath,
             args << (pandocUsesEmbedResources(pandoc) ? "--embed-resources"
                                                       : "--self-contained");
             args << "--metadata" << ("title=" + finalBase);
+        } else if (writer == "latex" || writer == "rst" || writer == "org"
+                   || writer == "asciidoc") {
+            // 同样是片段问题：LaTeX 缺 \documentclass、rst 缺标题，
+            // 拿去编译/发布都得自己补，加 -s 才是能直接用的完整文档。
+            args << "-s" << "--metadata" << ("title=" + finalBase);
         } else if (writer == "markdown") {
-            // 把 docx/pdf 里的图片抽出来，否则 markdown 里只剩指向不存在文件的链接
-            args << ("--extract-media=" + staging.filePath(mediaDirName));
+            // 把 docx/pdf 里的图片抽出来，否则 markdown 里只剩指向不存在文件的链接。
+            // 这里必须用相对路径（配合下面的工作目录），否则 pandoc 会把链接写成
+            // 临时目录的绝对路径，文件搬到输出目录后链接就全断了。
+            args << ("--extract-media=" + mediaDirName);
         }
-        return runProcess(pandoc, args, timeoutMs, token);
+        // 工作目录设成暂存目录：-o 仍然用绝对路径，
+        // 但 --extract-media 的相对路径会落在暂存目录里
+        return runProcess(pandoc, args, timeoutMs, token, staging.path());
     };
 
     // -----------------------------------------------------------------
     // 情况一：目标是 PDF
     // -----------------------------------------------------------------
     if (targetIsPdf) {
-        // md / txt / epub 直接转 PDF 依赖 LaTeX 环境，成功率不稳定；
-        // 先用 Pandoc 转成 docx，再交给 LibreOffice 排版成 PDF。
-        if (ext == "md" || ext == "txt" || ext == "epub" || ext == "odt") {
+        // md / txt / epub / tex / rst / org / adoc 直接转 PDF 依赖 LaTeX 环境，
+        // 成功率不稳定；先用 Pandoc 转成 docx，再交给 LibreOffice 排版成 PDF。
+        if (isMarkupSource(ext)) {
             const QString mid = staging.filePath("_dc_stage.docx");
             Result r1 = pandocConvert(inputPath, mid, "docx");
             if (r1.canceled)
@@ -700,56 +776,97 @@ Converter::Result Converter::convertFile(const QString &inputPath,
         // 会报 "no export filter"，必须显式指定 writer_pdf_import。
         const QString infilter = "writer_pdf_import";
 
-        // 2.1 目标 docx：优先用 pdf2docx（排版还原明显更好）
-        if (target == "docx" && pdf2docxAvailable()) {
-            const QString python = pythonPath();
-            const QString script = QCoreApplication::applicationDirPath() + "/scripts/pdf2docx_convert.py";
-            if (!python.isEmpty() && QFileInfo(script).isFile()) {
-                // -X utf8 让 python 的 stdout/stderr 也用 UTF-8，
-                // 否则 Windows 下默认 GBK，我们按 UTF-8 解码就会乱码
-                const QStringList args = {"-X", "utf8", "-u", script, inputPath, stagedOut};
-                // pdf2docx 比命令行工具慢得多，超时给两倍
-                Result r = runProcess(python, args, timeoutMs * 2, token);
-                if (r.canceled)
-                    return r;
-                if (r.success && fileReady(stagedOut)) {
-                    produced = stagedOut;
-                    // 脚本在结果几乎没文字时会打 SCANNED_PDF 标记（见 pdf2docx_convert.py）
-                    if (r.output.contains("SCANNED_PDF"))
-                        notes << "该 PDF 可能是扫描件（图片型），结果几乎不含文字，需要先 OCR";
-                } else {
+        // PDF → docx 是所有「PDF 转文档/文本」的公共第一步。
+        // 优先 pdf2docx：它能把正文还原成真正的段落；LibreOffice 的 PDF 导入
+        // 会把正文塞进文本框，Pandoc 读 docx 时直接看不到（只剩标题）。
+        // pdf2docx 没装或失败时再退回 LibreOffice，保证链路还能走通。
+        auto pdfToDocx = [&](const QString &dest) -> Result {
+            Result ok;
+
+            if (pdf2docxAvailable()) {
+                const QString python = pythonPath();
+                const QString script = QCoreApplication::applicationDirPath()
+                                       + "/scripts/pdf2docx_convert.py";
+                if (!python.isEmpty() && QFileInfo(script).isFile()) {
+                    // -X utf8 让 python 的 stdout/stderr 也用 UTF-8，
+                    // 否则 Windows 下默认 GBK，我们按 UTF-8 解码就会乱码
+                    const QStringList args = {"-X", "utf8", "-u", script, inputPath, dest};
+                    // pdf2docx 比命令行工具慢得多，超时给两倍
+                    Result r = runProcess(python, args, timeoutMs * 2, token);
+                    if (r.canceled) {
+                        ok.canceled = true;
+                        return ok;
+                    }
+                    if (r.success && fileReady(dest)) {
+                        ok.success = true;
+                        // 脚本在结果几乎没文字时会打 SCANNED_PDF 标记
+                        if (r.output.contains("SCANNED_PDF"))
+                            notes << "该 PDF 可能是扫描件（图片型），结果几乎不含文字，需要先 OCR";
+                        return ok;
+                    }
                     // 不再静默降级：把失败原因带出去，日志里能看到实际用了哪个引擎
                     notes << ("pdf2docx 失败，已退回 LibreOffice：" +
                               (r.message.isEmpty() ? QString("未产出文件") : r.message));
+                    QFile::remove(dest);
+                }
+            }
+
+            Result r = sofficeConvert(inputPath, "docx", staging.path(), infilter);
+            if (r.canceled) {
+                ok.canceled = true;
+                return ok;
+            }
+            // LibreOffice 的输出名跟着输入基名走，不能自己编个名字
+            const QString loOut = staging.filePath(base + ".docx");
+            if (!r.success) {
+                notes << ("PDF 转 docx 失败：" + r.message);
+                return ok;
+            }
+            if (!fileReady(loOut)) {
+                notes << "PDF 转 docx 未产出文件（可能是纯图片扫描件）";
+                return ok;
+            }
+            if (loOut != dest && !moveFile(loOut, dest)) {
+                notes << "PDF 转 docx 的中间文件无法重命名";
+                return ok;
+            }
+            ok.success = true;
+            return ok;
+        };
+
+        // 2.1 目标就是 docx
+        if (target == "docx") {
+            Result r = pdfToDocx(stagedOut);
+            if (r.canceled)
+                return r;
+            if (r.success)
+                produced = stagedOut;
+        }
+
+        // 2.2 Pandoc 写得出来的目标（md/html/epub/txt/tex/rst/org/adoc/pptx）：
+        //     LibreOffice 只有 docx/txt/rtf 等少数导出过滤器，统一走
+        //     pdf -> docx -> 目标(Pandoc)。
+        //     失败时不直接放弃，落到 2.3 再让 LibreOffice 试一次，并把原因记在 notes 里。
+        const QString pdfWriter = pandocWriterFor(target);
+        if (produced.isEmpty() && !pdfWriter.isEmpty()
+            && target != "docx" && target != "odt" && target != "rtf") {
+            const QString mid = staging.filePath("_dc_pdf_stage.docx");
+            Result r1 = pdfToDocx(mid);
+            if (r1.canceled)
+                return r1;
+
+            if (r1.success) {
+                Result r2 = pandocConvert(mid, stagedOut, pdfWriter);
+                if (r2.canceled)
+                    return r2;
+                if (r2.success && fileReady(stagedOut)) {
+                    produced = stagedOut;
+                } else {
+                    notes << ("Pandoc 转 " + target + " 失败：" +
+                              (r2.message.isEmpty() ? QString("未产出文件") : r2.message));
                     QFile::remove(stagedOut);
                 }
             }
-        }
-
-        // 2.2 目标 md / html / epub：LibreOffice 没有这些导出过滤器，
-        //     统一走 pdf -> docx(LibreOffice) -> 目标(Pandoc)
-        if (produced.isEmpty()
-            && (target == "md" || target == "html" || target == "epub")) {
-            const QString mid = staging.filePath("_dc_stage.docx");
-            Result r1 = sofficeConvert(inputPath, "docx", staging.path(), infilter);
-            if (r1.canceled)
-                return r1;
-            if (!r1.success) {
-                r1.message = QStringList(notes + QStringList{r1.message}).join("；");
-                return r1;
-            }
-            if (!fileReady(mid)) {
-                result.message = "LibreOffice 未生成中间 docx，PDF 可能是纯图片扫描件";
-                return result;
-            }
-            Result r2 = pandocConvert(mid, stagedOut, pandocWriterFor(target));
-            if (r2.canceled)
-                return r2;
-            if (!r2.success) {
-                r2.message = QStringList(notes + QStringList{r2.message}).join("；");
-                return r2;
-            }
-            produced = stagedOut;
         }
 
         // 2.3 其余目标格式交给 LibreOffice
@@ -769,23 +886,62 @@ Converter::Result Converter::convertFile(const QString &inputPath,
     // -----------------------------------------------------------------
     else {
         const QString writer = pandocWriterFor(target);
-        Result r = pandocConvert(inputPath, stagedOut, writer);
-        if (r.canceled)
-            return r;
-        if (r.success && fileReady(stagedOut)) {
-            produced = stagedOut;
-        } else {
-            if (!r.success)
-                notes << ("Pandoc 失败：" + r.message);
-            else
-                notes << "Pandoc 未产出文件";
-            QFile::remove(stagedOut);   // 清掉可能的半成品，避免干扰下一步
 
+        // pptx：Impress 只能导出演示格式 / PDF / 图片，写不出 docx 这类文档格式
+        // （直接转会报 "no export filter"）。先落成 PDF，再复用整条「PDF → 目标」的链路。
+        if (ext == "pptx") {
+            Result r = sofficeConvert(inputPath, "pdf", staging.path(), QString());
+            if (r.canceled)
+                return r;
+            if (!r.success) {
+                result.message = r.message;
+                return result;
+            }
+            const QString midPdf = staging.filePath(base + ".pdf");
+            if (!fileReady(midPdf)) {
+                result.message = "LibreOffice 未能把 PPTX 转成 PDF，无法继续转换";
+                return result;
+            }
+            // 递归调用自己的「PDF 源」分支：输出目录用外层暂存目录，
+            // 这样产物在本函数返回前一直有效
+            Result sub = convertFile(midPdf, target, staging.path(), token);
+            if (sub.canceled)
+                return sub;
+            if (!sub.success) {
+                result.message = "PPTX 需要先转成 PDF 再转目标格式，中途失败：" + sub.message;
+                return result;
+            }
+            produced = sub.outputPath;
+            if (!sub.message.isEmpty())
+                notes << sub.message;
+            notes << "PPTX 已先按页转成 PDF，再转成目标格式";
+        }
+
+        // writer 为空说明 Pandoc 写不出这个格式（目前只有 doc），
+        // 那就别白试一次，直接交给 LibreOffice。
+        if (produced.isEmpty() && !writer.isEmpty() && pandocCanRead(ext)) {
+            Result r = pandocConvert(inputPath, stagedOut, writer);
+            if (r.canceled)
+                return r;
+            if (r.success && fileReady(stagedOut)) {
+                produced = stagedOut;
+            } else {
+                if (!r.success)
+                    notes << ("Pandoc 失败：" + r.message);
+                else
+                    notes << "Pandoc 未产出文件";
+                QFile::remove(stagedOut);   // 清掉可能的半成品，避免干扰下一步
+            }
+        }
+
+        if (produced.isEmpty()) {
             Result r2 = sofficeConvert(inputPath, target, staging.path(), QString());
             if (r2.canceled)
                 return r2;
             if (!r2.success) {
-                r2.message = notes.join("；") + "；LibreOffice 失败：" + r2.message;
+                r2.message = notes.isEmpty()
+                                 ? r2.message
+                                 : (notes.join("；") + "；LibreOffice 失败：" + r2.message);
                 return r2;
             }
             produced = staging.filePath(base + "." + target);

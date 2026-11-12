@@ -19,6 +19,7 @@ private slots:
     // ---- 纯逻辑，不需要引擎 ----
     void testUniqueOutputPath();
     void testIsSupportedSource();
+    void testFormatLists();
     void testSameFormatSkipped();
     void testMissingInput();
     void testCancelToken();
@@ -30,6 +31,10 @@ private slots:
     void testDocxToHtml();
     void testDocxToMd();
     void testPdfToDocx();
+    void testMdToTex();
+    void testMdToPptx();
+    void testDocxToDoc();
+    void testPdfToMarkdown();
 
 private:
     void requireEngines();
@@ -103,6 +108,30 @@ void TestConverter::testIsSupportedSource()
     QVERIFY(!Converter::isSupportedSource("a.exe"));
     QVERIFY(!Converter::isSupportedSource("a.xlsx"));
     QVERIFY(!Converter::isSupportedSource("noext"));
+}
+
+void TestConverter::testFormatLists()
+{
+    const QStringList targets = Converter::supportedTargetFormats();
+    for (const QString &expected : {"pdf", "docx", "doc", "odt", "rtf", "txt",
+                                    "html", "md", "epub", "pptx", "tex",
+                                    "rst", "org", "adoc"}) {
+        QVERIFY2(targets.contains(expected), qPrintable("缺少目标格式 " + expected));
+        // 每个目标格式都应该能当源格式用，否则会出现「能转出却拖不进来」
+        QVERIFY2(Converter::isSupportedSource("a." + expected),
+                 qPrintable("目标格式没有对应的源格式支持：" + expected));
+    }
+
+    // 源后缀清单要覆盖目标格式（多出来的 htm/markdown/asciidoc 是别名，正常）
+    const QStringList sources = Converter::supportedSourceExtensions();
+    for (const QString &t : targets) {
+        bool covered = false;
+        for (const QString &s : sources) {
+            if (QFileInfo("a." + s).suffix().compare(t, Qt::CaseInsensitive) == 0)
+                covered = true;
+        }
+        QVERIFY2(covered, qPrintable("源后缀清单缺少：" + t));
+    }
 }
 
 void TestConverter::testSameFormatSkipped()
@@ -236,6 +265,76 @@ void TestConverter::testPdfToDocx()
 
     // 这是文字版 PDF，不应触发扫描件提示
     QVERIFY(!r.message.contains("扫描件"));
+}
+
+void TestConverter::testMdToTex()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    const Converter::Result r = Converter::convertFile(m_mdPath, "tex", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString tex = QString::fromUtf8(f.readAll());
+    QVERIFY(tex.contains("\\documentclass"));
+    QVERIFY(tex.contains("标题一"));
+}
+
+void TestConverter::testMdToPptx()
+{
+    requireEngines();
+    if (Converter::pandocPath().isEmpty())
+        QSKIP("未安装 Pandoc");
+
+    const Converter::Result r = Converter::convertFile(m_mdPath, "pptx", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+    QVERIFY(QFileInfo(r.outputPath).size() > 1000);
+
+    // pptx 是 zip 容器（PK 头），顺便确认不是空壳
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    QCOMPARE(f.read(2), QByteArray("PK"));
+}
+
+void TestConverter::testDocxToDoc()
+{
+    requireEngines();
+    if (m_docxPath.isEmpty())
+        QSKIP("依赖 testMdToDocx 的产物");
+    if (Converter::sofficePath().isEmpty())
+        QSKIP("doc 格式只有 LibreOffice 能写，未安装则跳过");
+
+    const Converter::Result r = Converter::convertFile(m_docxPath, "doc", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+    QVERIFY(QFileInfo(r.outputPath).size() > 0);
+    QCOMPARE(QFileInfo(r.outputPath).suffix(), QString("doc"));
+}
+
+void TestConverter::testPdfToMarkdown()
+{
+    requireEngines();
+    if (m_pdfPath.isEmpty())
+        QSKIP("依赖 testMdToPdf 的产物");
+    // LibreOffice 的 PDF 导入会把正文塞进文本框，Pandoc 读不到，
+    // 只有装了 pdf2docx 才拿得到完整正文，所以这条用例在无 pdf2docx 时跳过
+    if (!Converter::pdf2docxAvailable())
+        QSKIP("未安装 pdf2docx，PDF 正文提取质量无法保证");
+
+    const Converter::Result r = Converter::convertFile(m_pdfPath, "md", m_outDir);
+    QVERIFY2(r.success, qPrintable(r.message));
+
+    QFile f(r.outputPath);
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QString md = QString::fromUtf8(f.readAll());
+    QVERIFY2(md.size() > 100, qPrintable("markdown 太小，正文可能没提取到：" + md));
+    QVERIFY(md.contains("中文正文"));
+
+    // 图片链接必须是相对路径，否则文件搬走后全断
+    QVERIFY2(!md.contains(":/") || !md.contains("_media/"),
+             qPrintable("markdown 里的图片链接是绝对路径：" + md));
 }
 
 QTEST_GUILESS_MAIN(TestConverter)

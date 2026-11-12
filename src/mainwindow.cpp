@@ -125,7 +125,7 @@ void MainWindow::buildUi()
 
     auto *hint = new QLabel(
         "把文件或整个文件夹拖到下面的列表，也可用「添加文件 / 添加文件夹」。\n"
-        "支持 docx / doc / odt / rtf / txt / html / md / epub / pdf 互转。",
+        "支持 docx / doc / odt / rtf / txt / html / md / epub / pdf / pptx / tex / rst / org / adoc 互转。",
         this);
     hint->setWordWrap(true);
     hint->setStyleSheet("color: palette(mid);");
@@ -157,8 +157,29 @@ void MainWindow::buildUi()
     auto *row1 = new QHBoxLayout();
     row1->addWidget(new QLabel("目标格式：", this));
     m_formatCombo = new QComboBox(this);
-    for (const QString &fmt : Converter::supportedTargetFormats())
+    // 格式缩写对普通用户不直观，配一句说明放在悬停提示里
+    static const QHash<QString, QString> formatTips = {
+        {"pdf",  "PDF：版式固定的便携文档，适合分发与打印"},
+        {"docx", "Word 文档（2007 及以后）"},
+        {"doc",  "Word 97-2003 兼容格式，老系统/老软件需要"},
+        {"odt",  "OpenDocument 文本，LibreOffice / WPS 通用"},
+        {"rtf",  "富文本格式，跨软件兼容性最好"},
+        {"txt",  "纯文本，只保留文字，丢掉所有格式"},
+        {"html", "网页：单文件，样式与图片都内嵌"},
+        {"md",   "Markdown：适合写作、笔记与版本管理"},
+        {"epub", "电子书格式，适合阅读器"},
+        {"pptx", "PowerPoint 幻灯片：按标题层级自动分页"},
+        {"tex",  "LaTeX 源码：论文排版用"},
+        {"rst",  "reStructuredText：Python 文档常用"},
+        {"org",  "Org-mode：Emacs 生态的纯文本格式"},
+        {"adoc", "AsciiDoc：技术文档常用"}
+    };
+    for (const QString &fmt : Converter::supportedTargetFormats()) {
         m_formatCombo->addItem(fmt.toUpper(), fmt);
+        const auto tip = formatTips.constFind(fmt);
+        if (tip != formatTips.constEnd())
+            m_formatCombo->setItemData(m_formatCombo->count() - 1, tip.value(), Qt::ToolTipRole);
+    }
     m_formatCombo->setMinimumWidth(90);
     row1->addWidget(m_formatCombo);
     row1->addSpacing(16);
@@ -393,10 +414,12 @@ void MainWindow::addFilesToList(const QStringList &paths)
         QStringList batch;
 
         if (fi.isDir()) {
-            // 支持整个文件夹拖入：递归收集支持的格式
-            QDirIterator it(raw,
-                            {"*.pdf", "*.docx", "*.doc", "*.odt", "*.rtf",
-                             "*.txt", "*.html", "*.htm", "*.md", "*.markdown", "*.epub"},
+            // 支持整个文件夹拖入：递归收集支持的格式。
+            // 后缀清单统一由 Converter 提供，新增格式时不用改这里。
+            QStringList patterns;
+            for (const QString &ext : Converter::supportedSourceExtensions())
+                patterns << ("*." + ext);
+            QDirIterator it(raw, patterns,
                             QDir::Files, QDirIterator::Subdirectories);
             while (it.hasNext())
                 batch << it.next();
@@ -447,10 +470,13 @@ void MainWindow::addFilesToList(const QStringList &paths)
 
 void MainWindow::onAddFiles()
 {
+    QStringList patterns;
+    for (const QString &ext : Converter::supportedSourceExtensions())
+        patterns << ("*." + ext);
+    const QString filter = QString("文档 (%1);;所有文件 (*.*)").arg(patterns.join(' '));
+
     const QStringList files = QFileDialog::getOpenFileNames(
-        this, "选择要转换的文件", QString(),
-        "文档 (*.docx *.doc *.odt *.rtf *.txt *.html *.htm *.md *.markdown *.epub *.pdf);;"
-        "所有文件 (*.*)");
+        this, "选择要转换的文件", QString(), filter);
     addFilesToList(files);
 }
 
