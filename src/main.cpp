@@ -17,7 +17,9 @@ int main(int argc, char *argv[])
     app.setOrganizationName("LocalTools");
     app.setApplicationName("DocConverter");
     app.setApplicationVersion(DOC_CONVERTER_VERSION);
-    app.setApplicationDisplayName(QString("文档格式转换工具 v%1").arg(DOC_CONVERTER_VERSION));
+    // 标题栏会显示成「文档格式转换工具 — v1.4.0」，displayName 只补版本号，
+    // 避免和 windowTitle 重复两遍名字
+    app.setApplicationDisplayName(QString("v%1").arg(DOC_CONVERTER_VERSION));
     app.setWindowIcon(QIcon(":/icons/app_icon.ico"));
 
     // 单实例：双开会让两个进程同时往同一个输出目录写文件，
