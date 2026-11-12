@@ -1,7 +1,73 @@
 #include "installer.h"
+#include "converter.h"
 
+#include <QElapsedTimer>
+#include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
+
+namespace {
+
+// 边跑边排空输出：winget / pip 都会输出大量进度信息，
+// 不读走会让缓冲区无限膨胀。
+int runAndCollect(const QString &program,
+                  const QStringList &args,
+                  int timeoutMs,
+                  QString *mergedOutput)
+{
+    QProcess p;
+    p.setProgram(program);
+    p.setArguments(args);
+    p.setStandardInputFile(QProcess::nullDevice());
+    p.start();
+
+    if (!p.waitForStarted(8000))
+        return -1;
+
+    QByteArray buffer;
+    QElapsedTimer timer;
+    timer.start();
+
+    while (p.state() != QProcess::NotRunning) {
+        if (p.waitForFinished(200))
+            break;
+        buffer += p.readAllStandardOutput();
+        buffer += p.readAllStandardError();
+        if (buffer.size() > 128 * 1024)
+            buffer = buffer.right(64 * 1024);
+        if (timer.elapsed() > timeoutMs) {
+            p.kill();
+            p.waitForFinished(2000);
+            if (mergedOutput)
+                *mergedOutput = QString::fromUtf8(buffer.right(800));
+            return -2;   // 超时
+        }
+    }
+    buffer += p.readAllStandardOutput();
+    buffer += p.readAllStandardError();
+
+    if (mergedOutput)
+        *mergedOutput = QString::fromUtf8(buffer.right(800));
+
+    return p.exitStatus() == QProcess::CrashExit ? -3 : p.exitCode();
+}
+
+// 把 winget / pip 的尾部输出整理成一行可读的原因
+QString tailLine(const QString &output)
+{
+    const QStringList lines = output.split('\n', Qt::SkipEmptyParts);
+    for (int i = lines.size() - 1; i >= 0; --i) {
+        const QString line = lines.at(i).trimmed();
+        // 过滤掉 winget 进度条（█ 字符）和「正在…」这类无信息量的行
+        if (!line.isEmpty() && !line.startsWith('-')
+            && !line.contains(QChar(0x2588))
+            && !line.contains(QStringLiteral("正在")) && line.size() > 3)
+            return line.right(200);
+    }
+    return QString();
+}
+
+} // namespace
 
 bool Installer::isWingetAvailable()
 {
@@ -14,40 +80,46 @@ Installer::Result Installer::runWingetInstall(const QString &packageId, const QS
 
     if (!isWingetAvailable()) {
         r.message = QString("未检测到 winget（Windows 包管理器），无法自动安装 %1。"
-                             "请到微软商店搜索安装「应用安装程序」，或手动下载安装。")
+                            "请到微软商店搜索安装「应用安装程序」，或手动下载安装。")
                         .arg(displayName);
         return r;
     }
 
-    QProcess process;
     const QStringList args = {
         "install", "--id", packageId, "-e",
         "--silent",
         "--accept-package-agreements",
-        "--accept-source-agreements"
+        "--accept-source-agreements",
+        "--disable-interactivity"
     };
-    process.start("winget", args);
 
-    if (!process.waitForStarted(5000)) {
+    QString output;
+    // 安装包体积可能很大（LibreOffice 约 300MB），给足 15 分钟
+    const int code = runAndCollect("winget", args, 15 * 60 * 1000, &output);
+
+    if (code == -1) {
         r.message = QString("无法启动 winget 来安装 %1").arg(displayName);
         return r;
     }
-
-    // 安装包体积可能较大（尤其 LibreOffice 约 300MB），给足够长的超时时间
-    if (!process.waitForFinished(10 * 60 * 1000)) {
-        process.kill();
+    if (code == -2) {
         r.message = QString("安装 %1 超时，请检查网络后重试，或手动下载安装").arg(displayName);
         return r;
     }
-
-    const int code = process.exitCode();
-    if (code != 0) {
-        r.message = QString("安装 %1 可能未成功（退出码 %2）：%3")
-                         .arg(displayName)
-                         .arg(code)
-                         .arg(QString::fromLocal8Bit(process.readAllStandardError()));
+    // winget 用 0x8A150061 等 HRESULT 表示「已安装最新版」，这种情况算成功
+    const bool alreadyInstalled = output.contains(QStringLiteral("已安装"), Qt::CaseInsensitive)
+                                  || output.contains(QStringLiteral("already installed"),
+                                                     Qt::CaseInsensitive);
+    if (code != 0 && !alreadyInstalled) {
+        r.message = QString("安装 %1 失败（退出码 %2）：%3")
+                        .arg(displayName)
+                        .arg(code)
+                        .arg(tailLine(output));
         return r;
     }
+
+    // 装完立刻刷新：winget 只改了注册表，本进程的 PATH 还是旧值，
+    // 不刷新的话紧接着的状态检测依然会显示「未找到」。
+    Converter::refreshEngines();
 
     r.success = true;
     r.message = QString("%1 安装完成").arg(displayName);
@@ -64,64 +136,59 @@ Installer::Result Installer::installLibreOffice()
     return runWingetInstall("TheDocumentFoundation.LibreOffice", "LibreOffice");
 }
 
-static bool verifyPythonWorks(const QString &exePath)
-{
-    QProcess p;
-    p.start(exePath, {"--version"});
-    if (!p.waitForStarted(3000))
-        return false;
-    if (!p.waitForFinished(5000))
-        return false;
-    return p.exitCode() == 0;
-}
-
-static QString findPythonExe()
-{
-    const QStringList candidates = {"python", "python3", "py"};
-    for (const QString &c : candidates) {
-        const QString p = QStandardPaths::findExecutable(c);
-        if (!p.isEmpty() && verifyPythonWorks(p))
-            return p;
-    }
-    return QString();
-}
-
 Installer::Result Installer::installPdf2docx()
 {
     Result r;
-    QString python = findPythonExe();
+
+    // 复用 Converter 的探测逻辑，不再维护第二份 Python 查找代码
+    QString python = Converter::pythonPath();
 
     if (python.isEmpty()) {
-        // 本机没有 Python，先通过 winget 装一个
         const Result pyResult = runWingetInstall("Python.Python.3.12", "Python 3.12");
         if (!pyResult.success) {
             r.message = "安装 Python 失败，无法继续安装 pdf2docx：" + pyResult.message;
             return r;
         }
-        python = findPythonExe();
+        Converter::refreshEngines();
+        python = Converter::pythonPath();
         if (python.isEmpty()) {
-            r.message = "Python 安装完成，但当前进程还检测不到（PATH 未刷新）。"
-                         "请重启本程序（甚至重启电脑）后，再次点击安装按钮继续安装 pdf2docx。";
+            r.message = "Python 已安装，但当前进程还找不到它（环境变量未生效）。"
+                        "请重启本程序（必要时重启电脑）后再点一次安装。";
             return r;
         }
     }
 
-    QProcess process;
-    const QStringList args = {"-m", "pip", "install", "--user", "--upgrade", "pdf2docx"};
-    process.start(python, args);
+    const QStringList baseArgs = {
+        "-m", "pip", "install", "--user", "--upgrade",
+        "--disable-pip-version-check", "--no-warn-script-location"
+    };
 
-    if (!process.waitForStarted(5000)) {
-        r.message = "无法启动 pip 来安装 pdf2docx";
-        return r;
+    QString output;
+    int code = runAndCollect(python, QStringList(baseArgs) << "pdf2docx",
+                             10 * 60 * 1000, &output);
+
+    // 国内网络访问 pypi.org 经常超时，失败后自动换清华镜像再试一次
+    if (code != 0) {
+        const QStringList mirrorArgs = QStringList(baseArgs)
+                                       << "-i" << "https://pypi.tuna.tsinghua.edu.cn/simple"
+                                       << "pdf2docx";
+        QString mirrorOutput;
+        const int mirrorCode = runAndCollect(python, mirrorArgs,
+                                             10 * 60 * 1000, &mirrorOutput);
+        if (mirrorCode == -2) {
+            r.message = "安装 pdf2docx 超时（已尝试官方源和清华镜像），请检查网络";
+            return r;
+        }
+        if (mirrorCode != 0) {
+            r.message = QString("安装 pdf2docx 失败：%1").arg(tailLine(mirrorOutput));
+            return r;
+        }
+        code = 0;
+        output = mirrorOutput;
     }
-    if (!process.waitForFinished(5 * 60 * 1000)) {
-        process.kill();
-        r.message = "安装 pdf2docx 超时";
-        return r;
-    }
-    if (process.exitCode() != 0) {
-        r.message = QString("安装 pdf2docx 失败：%1")
-                        .arg(QString::fromLocal8Bit(process.readAllStandardError()));
+
+    if (code == -2) {
+        r.message = "安装 pdf2docx 超时，请检查网络后重试";
         return r;
     }
 

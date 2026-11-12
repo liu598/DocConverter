@@ -1,0 +1,54 @@
+# 由 CMakeLists.txt 配置生成，在 `cmake --install` 时执行。
+# 职责：把 Qt 运行时部署到安装目录（dll 与 exe 同级），并裁掉用不到的部分。
+
+# 用括号参数接收路径：CMake 的普通字符串会把反斜杠当转义符
+set(WINDEPLOYQT_EXE [==[@WINDEPLOYQT_EXE@]==])
+
+set(_dest "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+set(_exe "${_dest}/DocConverter.exe")
+
+if(NOT EXISTS "${_exe}")
+    message(FATAL_ERROR "在 ${_dest} 下找不到 DocConverter.exe，部署中止")
+endif()
+
+message(STATUS "Deploying Qt runtime to: ${_dest}")
+
+# --dir 保持「dll 与 exe 同级」的扁平布局，Windows 上最省心。
+# --no-opengl-sw 跳过 20MB 的软件 OpenGL 后备实现（纯 Widgets 用不到）。
+# --translations zh_CN 只带简体中文，省下 30 多种语言约 5MB。
+# --no-compiler-runtime：VC++ 运行库由 CMakeLists 的 InstallRequiredSystemLibraries
+#   直接装到根目录，这里再让 windeployqt 铺一份到 bin/ 只是重复占体积。
+execute_process(
+    COMMAND "${WINDEPLOYQT_EXE}"
+            --dir "${_dest}"
+            --release
+            --no-opengl-sw
+            --no-quick-import
+            --no-system-dxc-compiler
+            --no-compiler-runtime
+            --translations zh_CN
+            "${_exe}"
+    RESULT_VARIABLE _rc
+    OUTPUT_QUIET
+    ERROR_QUIET
+)
+if(NOT _rc EQUAL 0)
+    message(WARNING "windeployqt 返回 ${_rc}，请检查部署是否完整")
+endif()
+
+# 兜底清理：纯本地工具用不到网络模块及其插件
+foreach(_file "opengl32sw.dll" "Qt6Network.dll")
+    if(EXISTS "${_dest}/${_file}")
+        message(STATUS "  remove ${_file}")
+        file(REMOVE "${_dest}/${_file}")
+    endif()
+endforeach()
+
+foreach(_dir "networkinformation" "tls" "bin" "plugins")
+    if(IS_DIRECTORY "${_dest}/${_dir}")
+        message(STATUS "  remove ${_dir}/")
+        file(REMOVE_RECURSE "${_dest}/${_dir}")
+    endif()
+endforeach()
+
+message(STATUS "Deployment finished")

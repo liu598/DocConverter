@@ -1,19 +1,58 @@
 {
   "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
   "configurePresets": [
     {
-      "name": "windows-default",
-      "displayName": "Windows x64 (VS2022 + Qt)",
+      "name": "windows-msvc",
+      "displayName": "Windows x64 / MSVC 2022 / Qt 6.11.1 (Ninja, Release)",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
+      "binaryDir": "${sourceDir}/build/windows-msvc",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_PREFIX_PATH": "C:/Qt/6.7.0/msvc2019_64"
-      },
-      "architecture": {
-        "value": "x64",
-        "strategy": "external"
+        "CMAKE_PREFIX_PATH": "D:/Qt/6.11.1/msvc2022_64"
       }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "displayName": "Windows x64 / MSVC 2022 / Qt 6.11.1 (Ninja, Debug)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/windows-msvc-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "D:/Qt/6.11.1/msvc2022_64"
+      }
+    },
+    {
+      "name": "windows-vs2022",
+      "displayName": "Windows x64 / Visual Studio 2022",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/vs2022",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "D:/Qt/6.11.1/msvc2022_64"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "displayName": "Release",
+      "configurePreset": "windows-msvc"
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "configurePreset": "windows-msvc-debug"
+    },
+    {
+      "name": "vs2022-release",
+      "displayName": "Release (Visual Studio)",
+      "configurePreset": "windows-vs2022",
+      "configuration": "Release"
     }
   ]
 }
